@@ -17,6 +17,7 @@ from .models import (
     TimeLog,
     WeeklyAssignmentTemplate,
 )
+from .notifications import get_unfinished_today, get_upcoming_blocks
 from .services import (
     apply_assignment_change,
     apply_budget_change,
@@ -100,6 +101,10 @@ def dashboard(request):
     list above) with an over-budget warning flag, since a person may appear
     zero or several times in the instance list depending on how many chores
     they have today.
+
+    Also recomputes, on every load, which instances are starting soon and
+    which of today's are unfinished and overdue (see `chores.notifications`)
+    — no background jobs or polling involved.
     """
     today = timezone.localdate()
     week_start = week_start_of(today)
@@ -118,10 +123,20 @@ def dashboard(request):
         )
         people.append({"person": person, "over_budget": over_budget})
 
+    now = timezone.localtime(timezone.now())
+    upcoming_blocks = get_upcoming_blocks(now)
+    unfinished_today = get_unfinished_today(now)
+
     return render(
         request,
         "chores/dashboard.html",
-        {"instances": instances, "today": today, "people": people},
+        {
+            "instances": instances,
+            "today": today,
+            "people": people,
+            "upcoming_blocks": upcoming_blocks,
+            "unfinished_today": unfinished_today,
+        },
     )
 
 

@@ -5,3 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
     "django>=6.1",
 ]
+
+[dependency-groups]
+dev = [
+    "time-machine>=3.5.0",
+]

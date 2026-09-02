@@ -7,6 +7,32 @@
 <body>
     <h1>Today's Chores — {{ today }}</h1>
 
+    <h2>Starting soon</h2>
+    <ul>
+        {% for instance in upcoming_blocks %}
+            <li>
+                <strong>{{ instance.chore.name }}</strong>
+                — {{ instance.assigned_person.name }}
+                — {{ instance.scheduled_start|date:"Y-m-d" }} {{ instance.scheduled_start|time:"H:i" }}
+            </li>
+        {% empty %}
+            <li>Nothing starting soon.</li>
+        {% endfor %}
+    </ul>
+
+    <h2>Unfinished today</h2>
+    <ul>
+        {% for instance in unfinished_today %}
+            <li>
+                <strong>{{ instance.chore.name }}</strong>
+                — {{ instance.assigned_person.name }}
+                — {{ instance.scheduled_start|time:"H:i" }}
+            </li>
+        {% empty %}
+            <li>Nothing unfinished.</li>
+        {% endfor %}
+    </ul>
+
     <ul>
         {% for instance in instances %}
             <li>
