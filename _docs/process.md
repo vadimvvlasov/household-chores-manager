@@ -14,7 +14,7 @@ and QA as subagents. It does not groom, implement or test itself.
 
 Lifecycle
 
-1. Pick the next open issue from the backlog
+1. Pick the lowest-numbered open issue
 2. PM grooms it
 3. Engineer implements it
 4. QA verifies it
