@@ -44,6 +44,27 @@ Everything else (check-off, time-log, swap, propose/approve changes) has its own
 2. Dashboard (`/`) — today's chores; that week's instances generate automatically on page load, no separate step
 3. Calendar (`/calendar/?week=YYYY-MM-DD`) — any week, past weeks are read-only
 
+## Engineering process
+
+Every task is a GitHub issue, built by three roles orchestrated in sequence — PM grooms, Engineer implements, QA verifies. See [`_docs/process.md`](_docs/process.md) and the role definitions under [`_docs/team/`](_docs/team/) for the full detail.
+
+```mermaid
+flowchart TD
+    A[Pick lowest-numbered open issue] --> B[PM grooms it]
+    B --> C[Engineer implements it]
+    C --> D[QA verifies it]
+    D -- FAIL --> C
+    D -- PASS --> E[Orchestrator closes the issue]
+    E --> A
+
+    F["3 consecutive FAILs\non the same issue"] -.-> G[Stop, comment, wait for a human]
+    D -.-> F
+```
+
+- The engineer never closes the issue; QA never fixes code, only outputs PASS or FAIL
+- A FAIL retry goes straight back to the engineer — PM re-grooms only a fresh issue, not a retry
+- After 3 consecutive FAILs on the same issue, the loop stops and waits for a human instead of retrying forever
+
 ## Tests
 
 ```bash
