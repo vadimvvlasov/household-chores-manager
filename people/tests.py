@@ -61,3 +61,96 @@ class PersonModelTests(TestCase):
         person.save()
 
         self.assertTrue(Person.objects.filter(pk=person.pk, is_active=False).exists())
+
+
+class LoginAndActivePersonTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="family", password="password")
+        self.adult = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.kid = Person.objects.create(name="Sam", role=Person.Role.KID)
+
+    def login(self):
+        self.client.force_login(self.user)
+
+    def select(self, person):
+        session = self.client.session
+        session["active_person_id"] = person.id
+        session.save()
+
+    def test_unauthenticated_request_to_home_redirects_to_login(self):
+        response = self.client.get("/")
+
+        self.assertRedirects(response, "/login/?next=/", fetch_redirect_response=False)
+
+    def test_unauthenticated_requests_to_protected_paths_redirect_to_login(self):
+        for path in ["/profile/", "/profile/select/", "/logout/"]:
+            with self.subTest(path=path):
+                response = self.client.post(path) if path != "/profile/" else self.client.get(path)
+                self.assertRedirects(
+                    response, f"/login/?next={path}", fetch_redirect_response=False
+                )
+
+    def test_login_success_redirects_to_profile(self):
+        response = self.client.post(
+            reverse("login"), {"username": "family", "password": "password"}
+        )
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
+    def test_authenticated_with_no_active_person_redirects_to_profile(self):
+        self.login()
+
+        response = self.client.get("/")
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
+    def test_profile_picker_lists_only_active_people(self):
+        self.kid.is_active = False
+        self.kid.save()
+        self.login()
+
+        response = self.client.get(reverse("profile_picker"))
+
+        self.assertContains(response, "Alex")
+        self.assertNotContains(response, "Sam")
+
+    def test_selecting_person_persists_active_person_id_across_requests(self):
+        self.login()
+
+        response = self.client.post(reverse("select_person"), {"person_id": self.adult.id})
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        self.assertEqual(self.client.session["active_person_id"], self.adult.id)
+
+        # A later request in the same session no longer bounces to the picker.
+        second_response = self.client.get("/")
+        self.assertEqual(second_response.status_code, 200)
+
+    def test_selecting_inactive_person_does_not_set_session(self):
+        self.kid.is_active = False
+        self.kid.save()
+        self.login()
+
+        response = self.client.post(reverse("select_person"), {"person_id": self.kid.id})
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+        self.assertNotIn("active_person_id", self.client.session)
+
+    def test_logout_clears_active_person_id(self):
+        self.login()
+        self.select(self.adult)
+
+        self.client.post(reverse("logout"))
+
+        self.assertNotIn("active_person_id", self.client.session)
+
+    def test_deactivated_selected_person_is_treated_as_unset(self):
+        self.login()
+        self.select(self.adult)
+
+        self.adult.is_active = False
+        self.adult.save()
+
+        response = self.client.get("/")
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
