@@ -9,7 +9,7 @@ from django.utils import timezone
 from people.models import Person
 
 from .dateutils import week_start_of
-from .models import Chore, ChoreInstance, WeeklyAssignmentTemplate
+from .models import Chore, ChoreInstance, TimeLog, WeeklyAssignmentTemplate
 from .services import ensure_instances_generated
 
 
@@ -370,3 +370,266 @@ class ChoreInstanceAdminTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Dishes")
+
+
+class ChoreInstanceViewTestBase(TestCase):
+    """Shared setup for the dashboard and per-instance action views."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="family", password="password")
+        self.client.force_login(self.user)
+
+        self.chore = Chore.objects.create(name="Dishes")
+        self.active_person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.other_person = Person.objects.create(name="Sam", role=Person.Role.KID)
+
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.active_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+        self.today = timezone.localdate()
+
+        session = self.client.session
+        session["active_person_id"] = self.active_person.id
+        session.save()
+
+    def _make_instance(self, date, assigned_person=None, **extra):
+        assigned_person = assigned_person or self.active_person
+        defaults = {
+            "template": self.template,
+            "chore": self.chore,
+            "date": date,
+            "scheduled_start": timezone.make_aware(
+                datetime.datetime.combine(date, datetime.time(9, 0))
+            ),
+            "budgeted_minutes": 10,
+            "assigned_person": assigned_person,
+        }
+        defaults.update(extra)
+        return ChoreInstance.objects.create(**defaults)
+
+
+class DashboardViewTests(ChoreInstanceViewTestBase):
+    def test_lists_todays_instances_for_everyone_not_just_active_person(self):
+        self._make_instance(self.today, assigned_person=self.active_person)
+        other_template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.other_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.MONDAY,
+            start_time=datetime.time(10, 0),
+            duration_minutes=15,
+        )
+        ChoreInstance.objects.create(
+            template=other_template,
+            chore=self.chore,
+            date=self.today,
+            scheduled_start=timezone.make_aware(
+                datetime.datetime.combine(self.today, datetime.time(10, 0))
+            ),
+            budgeted_minutes=15,
+            assigned_person=self.other_person,
+        )
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Alex")
+        self.assertContains(response, "Sam")
+
+    def test_does_not_list_instances_from_other_days(self):
+        vacuum = Chore.objects.create(name="Vacuum")
+        vacuum_template = WeeklyAssignmentTemplate.objects.create(
+            chore=vacuum,
+            assigned_to=self.active_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.MONDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        ChoreInstance.objects.create(
+            template=vacuum_template,
+            chore=vacuum,
+            date=self.today - datetime.timedelta(days=1),
+            scheduled_start=timezone.make_aware(
+                datetime.datetime.combine(
+                    self.today - datetime.timedelta(days=1), datetime.time(9, 0)
+                )
+            ),
+            budgeted_minutes=10,
+            assigned_person=self.active_person,
+        )
+
+        response = self.client.get("/")
+
+        self.assertNotContains(response, "Vacuum")
+
+    def test_shows_done_and_not_done_state(self):
+        self._make_instance(self.today, is_done=False)
+
+        done_template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.other_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.TUESDAY,
+            start_time=datetime.time(11, 0),
+            duration_minutes=10,
+        )
+        ChoreInstance.objects.create(
+            template=done_template,
+            chore=self.chore,
+            date=self.today,
+            scheduled_start=timezone.make_aware(
+                datetime.datetime.combine(self.today, datetime.time(11, 0))
+            ),
+            budgeted_minutes=10,
+            assigned_person=self.other_person,
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.other_person,
+        )
+
+        response = self.client.get("/")
+
+        self.assertContains(response, "Not done")
+        self.assertContains(response, "Done")
+
+    def test_generates_this_weeks_instances_before_listing(self):
+        self.assertFalse(ChoreInstance.objects.exists())
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(ChoreInstance.objects.filter(template=self.template).exists())
+
+
+class CheckInstanceViewTests(ChoreInstanceViewTestBase):
+    def test_check_marks_done_with_active_person_and_redirects_home(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.post(reverse("check_instance", args=[instance.id]))
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        instance.refresh_from_db()
+        self.assertTrue(instance.is_done)
+        self.assertIsNotNone(instance.done_at)
+        self.assertEqual(instance.done_by, self.active_person)
+
+    def test_get_is_not_allowed(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.get(reverse("check_instance", args=[instance.id]))
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_check_against_past_instance_is_rejected_and_makes_no_change(self):
+        instance = self._make_instance(self.today - datetime.timedelta(days=1))
+
+        response = self.client.post(reverse("check_instance", args=[instance.id]))
+
+        self.assertIn(response.status_code, (302, 403))
+        instance.refresh_from_db()
+        self.assertFalse(instance.is_done)
+        self.assertIsNone(instance.done_at)
+        self.assertIsNone(instance.done_by)
+
+
+class UncheckInstanceViewTests(ChoreInstanceViewTestBase):
+    def test_uncheck_resets_done_state_and_redirects_home(self):
+        instance = self._make_instance(
+            self.today,
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.active_person,
+        )
+
+        response = self.client.post(reverse("uncheck_instance", args=[instance.id]))
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        instance.refresh_from_db()
+        self.assertFalse(instance.is_done)
+        self.assertIsNone(instance.done_at)
+        self.assertIsNone(instance.done_by)
+
+    def test_uncheck_against_past_instance_is_rejected_and_makes_no_change(self):
+        instance = self._make_instance(
+            self.today - datetime.timedelta(days=1),
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.active_person,
+        )
+
+        response = self.client.post(reverse("uncheck_instance", args=[instance.id]))
+
+        self.assertIn(response.status_code, (302, 403))
+        instance.refresh_from_db()
+        self.assertTrue(instance.is_done)
+        self.assertIsNotNone(instance.done_at)
+        self.assertEqual(instance.done_by, self.active_person)
+
+
+class LogTimeViewTests(ChoreInstanceViewTestBase):
+    def test_get_renders_form(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.get(reverse("log_time", args=[instance.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dishes")
+
+    def test_post_creates_time_log_with_active_person_and_redirects_home(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.post(
+            reverse("log_time", args=[instance.id]), {"minutes": "15", "note": "Quick pass"}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        log = TimeLog.objects.get(chore_instance=instance)
+        self.assertEqual(log.minutes, 15)
+        self.assertEqual(log.note, "Quick pass")
+        self.assertEqual(log.logged_by, self.active_person)
+        self.assertIsNotNone(log.logged_at)
+
+    def test_note_is_optional(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "10"})
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        log = TimeLog.objects.get(chore_instance=instance)
+        self.assertEqual(log.note, "")
+
+    def test_multiple_time_logs_allowed_and_independent_of_is_done(self):
+        instance = self._make_instance(self.today, is_done=False)
+
+        self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "10"})
+        self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "5"})
+
+        self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 2)
+        instance.refresh_from_db()
+        self.assertFalse(instance.is_done)  # logging time never checks it off
+
+    def test_checking_off_does_not_create_a_time_log(self):
+        instance = self._make_instance(self.today)
+
+        self.client.post(reverse("check_instance", args=[instance.id]))
+
+        self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
+
+    def test_post_against_past_instance_is_rejected_and_creates_no_log(self):
+        instance = self._make_instance(self.today - datetime.timedelta(days=1))
+
+        response = self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "10"})
+
+        self.assertIn(response.status_code, (302, 403))
+        self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
+
+    def test_invalid_minutes_does_not_create_a_log(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "not-a-number"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
