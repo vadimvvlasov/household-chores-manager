@@ -9,8 +9,18 @@ from django.utils import timezone
 from people.models import Person
 
 from .dateutils import week_start_of
-from .models import Chore, ChoreInstance, TimeLog, WeeklyAssignmentTemplate
+from .models import (
+    Chore,
+    ChoreInstance,
+    ProposalStatus,
+    ProposedAssignmentChange,
+    ProposedBudgetChange,
+    TimeLog,
+    WeeklyAssignmentTemplate,
+)
 from .services import (
+    apply_assignment_change,
+    apply_budget_change,
     ensure_instances_generated,
     is_over_budget,
     minutes_logged_this_week,
@@ -1084,3 +1094,534 @@ class BudgetDoesNotBlockActionsTests(ChoreInstanceViewTestBase):
 
         instance.refresh_from_db()
         self.assertTrue(instance.is_done)
+
+
+class ApplyAssignmentChangeServiceTests(TestCase):
+    def setUp(self):
+        self.chore = Chore.objects.create(name="Dishes")
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.other_person = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+    def test_none_target_template_creates_new_template(self):
+        result = apply_assignment_change(
+            target_template=None,
+            chore=self.chore,
+            assigned_to=self.other_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.TUESDAY,
+            start_time=datetime.time(14, 0),
+            duration_minutes=20,
+        )
+
+        self.assertEqual(WeeklyAssignmentTemplate.objects.count(), 2)
+        self.assertEqual(result.assigned_to, self.other_person)
+        self.assertEqual(result.duration_minutes, 20)
+
+    def test_given_target_template_updates_it_in_place(self):
+        result = apply_assignment_change(
+            target_template=self.template,
+            chore=self.chore,
+            assigned_to=self.other_person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.WEDNESDAY,
+            start_time=datetime.time(15, 0),
+            duration_minutes=35,
+        )
+
+        self.assertEqual(result.pk, self.template.pk)
+        self.assertEqual(WeeklyAssignmentTemplate.objects.count(), 1)
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.other_person)
+        self.assertEqual(self.template.day_of_week, WeeklyAssignmentTemplate.DayOfWeek.WEDNESDAY)
+        self.assertEqual(self.template.duration_minutes, 35)
+
+
+class ApplyBudgetChangeServiceTests(TestCase):
+    def setUp(self):
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+
+    def test_sets_only_daily_when_weekly_is_none(self):
+        apply_budget_change(self.person, daily_budget_minutes=50, weekly_budget_minutes=None)
+
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.daily_budget_minutes, 50)
+        self.assertIsNone(self.person.weekly_budget_minutes)
+
+    def test_sets_only_weekly_when_daily_is_none(self):
+        apply_budget_change(self.person, daily_budget_minutes=None, weekly_budget_minutes=200)
+
+        self.person.refresh_from_db()
+        self.assertIsNone(self.person.daily_budget_minutes)
+        self.assertEqual(self.person.weekly_budget_minutes, 200)
+
+    def test_sets_both_when_both_given(self):
+        apply_budget_change(self.person, daily_budget_minutes=10, weekly_budget_minutes=60)
+
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.daily_budget_minutes, 10)
+        self.assertEqual(self.person.weekly_budget_minutes, 60)
+
+    def test_existing_value_untouched_when_its_field_is_none(self):
+        self.person.daily_budget_minutes = 15
+        self.person.save()
+
+        apply_budget_change(self.person, daily_budget_minutes=None, weekly_budget_minutes=90)
+
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.daily_budget_minutes, 15)
+        self.assertEqual(self.person.weekly_budget_minutes, 90)
+
+
+class ProposedAssignmentChangeModelTests(TestCase):
+    def setUp(self):
+        self.chore = Chore.objects.create(name="Dishes")
+        self.adult = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.kid = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.adult,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+    def _make_proposal(self, **extra):
+        defaults = dict(
+            target_template=self.template,
+            chore=self.chore,
+            assigned_to=self.kid,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.MONDAY,
+            start_time=datetime.time(16, 0),
+            duration_minutes=25,
+            proposed_by=self.adult,
+        )
+        defaults.update(extra)
+        return ProposedAssignmentChange.objects.create(**defaults)
+
+    def test_defaults_to_pending_with_no_review_fields(self):
+        proposal = self._make_proposal()
+
+        self.assertEqual(proposal.status, ProposalStatus.PENDING)
+        self.assertIsNone(proposal.reviewed_by)
+        self.assertIsNone(proposal.reviewed_at)
+
+    def test_approve_applies_change_via_service_and_sets_review_fields(self):
+        proposal = self._make_proposal()
+
+        proposal.approve(self.adult)
+
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.kid)
+        self.assertEqual(self.template.duration_minutes, 25)
+        self.assertEqual(proposal.status, ProposalStatus.APPROVED)
+        self.assertEqual(proposal.reviewed_by, self.adult)
+        self.assertIsNotNone(proposal.reviewed_at)
+
+    def test_approve_with_null_target_template_creates_a_new_template(self):
+        proposal = self._make_proposal(target_template=None)
+        before = WeeklyAssignmentTemplate.objects.count()
+
+        proposal.approve(self.adult)
+
+        self.assertEqual(WeeklyAssignmentTemplate.objects.count(), before + 1)
+
+    def test_reject_makes_no_live_data_change(self):
+        proposal = self._make_proposal()
+
+        proposal.reject(self.adult, note="no thanks")
+
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.adult)
+        self.assertEqual(self.template.duration_minutes, 10)
+        self.assertEqual(proposal.status, ProposalStatus.REJECTED)
+        self.assertEqual(proposal.note, "no thanks")
+        self.assertEqual(proposal.reviewed_by, self.adult)
+        self.assertIsNotNone(proposal.reviewed_at)
+
+    def test_deleting_referenced_target_template_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.template.delete()
+
+    def test_deleting_referenced_chore_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.chore.delete()
+
+    def test_deleting_referenced_assigned_to_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.kid.delete()
+
+    def test_deleting_referenced_proposed_by_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.adult.delete()
+
+    def test_deleting_referenced_reviewed_by_is_protected(self):
+        reviewer = Person.objects.create(name="Jordan", role=Person.Role.ADULT)
+        proposal = self._make_proposal()
+        proposal.approve(reviewer)
+
+        with self.assertRaises(ProtectedError):
+            reviewer.delete()
+
+
+class ProposedBudgetChangeModelTests(TestCase):
+    def setUp(self):
+        self.adult = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.kid = Person.objects.create(name="Sam", role=Person.Role.KID)
+
+    def _make_proposal(self, **extra):
+        defaults = dict(person=self.kid, daily_budget_minutes=30, proposed_by=self.adult)
+        defaults.update(extra)
+        return ProposedBudgetChange.objects.create(**defaults)
+
+    def test_defaults_to_pending_with_no_review_fields(self):
+        proposal = self._make_proposal()
+
+        self.assertEqual(proposal.status, ProposalStatus.PENDING)
+        self.assertIsNone(proposal.reviewed_by)
+        self.assertIsNone(proposal.reviewed_at)
+
+    def test_approve_applies_only_non_none_fields_via_service(self):
+        proposal = self._make_proposal(daily_budget_minutes=45, weekly_budget_minutes=None)
+
+        proposal.approve(self.adult)
+
+        self.kid.refresh_from_db()
+        self.assertEqual(self.kid.daily_budget_minutes, 45)
+        self.assertIsNone(self.kid.weekly_budget_minutes)
+        self.assertEqual(proposal.status, ProposalStatus.APPROVED)
+        self.assertEqual(proposal.reviewed_by, self.adult)
+        self.assertIsNotNone(proposal.reviewed_at)
+
+    def test_reject_makes_no_live_data_change(self):
+        proposal = self._make_proposal(daily_budget_minutes=45)
+
+        proposal.reject(self.adult, note="later")
+
+        self.kid.refresh_from_db()
+        self.assertIsNone(self.kid.daily_budget_minutes)
+        self.assertEqual(proposal.status, ProposalStatus.REJECTED)
+        self.assertEqual(proposal.note, "later")
+
+    def test_deleting_referenced_person_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.kid.delete()
+
+    def test_deleting_referenced_proposed_by_is_protected(self):
+        self._make_proposal()
+
+        with self.assertRaises(ProtectedError):
+            self.adult.delete()
+
+    def test_deleting_referenced_reviewed_by_is_protected(self):
+        reviewer = Person.objects.create(name="Jordan", role=Person.Role.ADULT)
+        proposal = self._make_proposal()
+        proposal.approve(reviewer)
+
+        with self.assertRaises(ProtectedError):
+            reviewer.delete()
+
+
+class ProposalViewTestBase(TestCase):
+    """Shared setup for the assignment/budget edit views and the approvals
+    views: a logged-in user with an adult and a kid `Person` to switch the
+    active person between.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="family3", password="password")
+        self.client.force_login(self.user)
+
+        self.chore = Chore.objects.create(name="Dishes")
+        self.adult = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.kid = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.adult,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+    def _select(self, person):
+        session = self.client.session
+        session["active_person_id"] = person.id
+        session.save()
+
+
+class AssignmentEditViewTests(ProposalViewTestBase):
+    def test_kid_post_new_assignment_creates_pending_proposal_no_template_created(self):
+        self._select(self.kid)
+
+        response = self.client.post(
+            reverse("assignment_new"),
+            {
+                "chore": self.chore.id,
+                "assigned_to": self.kid.id,
+                "day_of_week": WeeklyAssignmentTemplate.DayOfWeek.MONDAY,
+                "start_time": "10:00",
+                "duration_minutes": "20",
+            },
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        self.assertEqual(WeeklyAssignmentTemplate.objects.count(), 1)  # only setUp's
+        proposal = ProposedAssignmentChange.objects.get()
+        self.assertEqual(proposal.status, ProposalStatus.PENDING)
+        self.assertIsNone(proposal.target_template)
+        self.assertEqual(proposal.proposed_by, self.kid)
+        self.assertEqual(proposal.assigned_to, self.kid)
+        self.assertEqual(proposal.duration_minutes, 20)
+
+    def test_kid_post_edit_creates_pending_proposal_and_leaves_template_untouched(self):
+        self._select(self.kid)
+
+        response = self.client.post(
+            reverse("assignment_edit", args=[self.template.id]),
+            {
+                "chore": self.chore.id,
+                "assigned_to": self.kid.id,
+                "day_of_week": WeeklyAssignmentTemplate.DayOfWeek.TUESDAY,
+                "start_time": "11:00",
+                "duration_minutes": "30",
+            },
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        proposal = ProposedAssignmentChange.objects.get()
+        self.assertEqual(proposal.target_template, self.template)
+        self.assertEqual(proposal.status, ProposalStatus.PENDING)
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.adult)
+        self.assertEqual(self.template.duration_minutes, 10)
+
+    def test_adult_post_edit_applies_immediately_with_no_proposal_created(self):
+        self._select(self.adult)
+
+        response = self.client.post(
+            reverse("assignment_edit", args=[self.template.id]),
+            {
+                "chore": self.chore.id,
+                "assigned_to": self.kid.id,
+                "day_of_week": WeeklyAssignmentTemplate.DayOfWeek.WEDNESDAY,
+                "start_time": "12:00",
+                "duration_minutes": "40",
+            },
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        self.assertFalse(ProposedAssignmentChange.objects.exists())
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.kid)
+        self.assertEqual(self.template.duration_minutes, 40)
+
+    def test_adult_post_new_creates_template_immediately_with_no_proposal(self):
+        self._select(self.adult)
+
+        response = self.client.post(
+            reverse("assignment_new"),
+            {
+                "chore": self.chore.id,
+                "assigned_to": self.adult.id,
+                "day_of_week": WeeklyAssignmentTemplate.DayOfWeek.THURSDAY,
+                "start_time": "13:00",
+                "duration_minutes": "25",
+            },
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        self.assertFalse(ProposedAssignmentChange.objects.exists())
+        self.assertEqual(WeeklyAssignmentTemplate.objects.count(), 2)
+
+
+class BudgetEditViewTests(ProposalViewTestBase):
+    def test_kid_post_creates_pending_proposal_and_leaves_budget_untouched(self):
+        self._select(self.kid)
+
+        response = self.client.post(
+            reverse("budget_edit", args=[self.adult.id]), {"daily_budget_minutes": "45"}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        proposal = ProposedBudgetChange.objects.get()
+        self.assertEqual(proposal.status, ProposalStatus.PENDING)
+        self.assertEqual(proposal.person, self.adult)
+        self.assertEqual(proposal.daily_budget_minutes, 45)
+        self.assertIsNone(proposal.weekly_budget_minutes)
+        self.assertEqual(proposal.proposed_by, self.kid)
+        self.adult.refresh_from_db()
+        self.assertIsNone(self.adult.daily_budget_minutes)
+
+    def test_adult_post_applies_immediately_with_no_proposal_created(self):
+        self._select(self.adult)
+
+        response = self.client.post(
+            reverse("budget_edit", args=[self.kid.id]), {"weekly_budget_minutes": "300"}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        self.assertFalse(ProposedBudgetChange.objects.exists())
+        self.kid.refresh_from_db()
+        self.assertEqual(self.kid.weekly_budget_minutes, 300)
+
+
+class ApprovalsListViewTests(ProposalViewTestBase):
+    def test_lists_pending_assignment_and_budget_changes_visible_to_a_kid(self):
+        ProposedAssignmentChange.objects.create(
+            target_template=None,
+            chore=self.chore,
+            assigned_to=self.kid,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.FRIDAY,
+            start_time=datetime.time(14, 0),
+            duration_minutes=15,
+            proposed_by=self.kid,
+        )
+        ProposedBudgetChange.objects.create(
+            person=self.kid, daily_budget_minutes=20, proposed_by=self.kid
+        )
+        self._select(self.kid)
+
+        response = self.client.get(reverse("approvals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dishes")
+        self.assertContains(response, "Sam")
+
+    def test_non_pending_changes_are_not_listed(self):
+        approved = ProposedBudgetChange.objects.create(
+            person=self.kid,
+            daily_budget_minutes=20,
+            proposed_by=self.kid,
+            status=ProposalStatus.APPROVED,
+        )
+        self._select(self.adult)
+
+        response = self.client.get(reverse("approvals"))
+
+        self.assertNotIn(approved, response.context["budget_changes"])
+
+
+class ApproveRejectAssignmentChangeViewTests(ProposalViewTestBase):
+    def setUp(self):
+        super().setUp()
+        self.proposal = ProposedAssignmentChange.objects.create(
+            target_template=self.template,
+            chore=self.chore,
+            assigned_to=self.kid,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SATURDAY,
+            start_time=datetime.time(15, 0),
+            duration_minutes=50,
+            proposed_by=self.kid,
+        )
+
+    def test_adult_approve_applies_change_via_service_and_updates_status(self):
+        self._select(self.adult)
+
+        response = self.client.post(reverse("approve_assignment_change", args=[self.proposal.id]))
+
+        self.assertRedirects(response, reverse("approvals"), fetch_redirect_response=False)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.APPROVED)
+        self.assertEqual(self.proposal.reviewed_by, self.adult)
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.kid)
+        self.assertEqual(self.template.duration_minutes, 50)
+
+    def test_adult_reject_leaves_live_data_untouched(self):
+        self._select(self.adult)
+
+        response = self.client.post(
+            reverse("reject_assignment_change", args=[self.proposal.id]), {"note": "not now"}
+        )
+
+        self.assertRedirects(response, reverse("approvals"), fetch_redirect_response=False)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.REJECTED)
+        self.assertEqual(self.proposal.note, "not now")
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.adult)
+        self.assertEqual(self.template.duration_minutes, 10)
+
+    def test_kid_approve_gets_403_and_makes_no_state_change(self):
+        self._select(self.kid)
+
+        response = self.client.post(reverse("approve_assignment_change", args=[self.proposal.id]))
+
+        self.assertEqual(response.status_code, 403)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.PENDING)
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.assigned_to, self.adult)
+
+    def test_kid_reject_gets_403_and_makes_no_state_change(self):
+        self._select(self.kid)
+
+        response = self.client.post(reverse("reject_assignment_change", args=[self.proposal.id]))
+
+        self.assertEqual(response.status_code, 403)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.PENDING)
+
+
+class ApproveRejectBudgetChangeViewTests(ProposalViewTestBase):
+    def setUp(self):
+        super().setUp()
+        self.proposal = ProposedBudgetChange.objects.create(
+            person=self.kid, daily_budget_minutes=40, proposed_by=self.kid
+        )
+
+    def test_adult_approve_applies_change_via_service_and_updates_status(self):
+        self._select(self.adult)
+
+        response = self.client.post(reverse("approve_budget_change", args=[self.proposal.id]))
+
+        self.assertRedirects(response, reverse("approvals"), fetch_redirect_response=False)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.APPROVED)
+        self.kid.refresh_from_db()
+        self.assertEqual(self.kid.daily_budget_minutes, 40)
+
+    def test_adult_reject_leaves_budget_untouched(self):
+        self._select(self.adult)
+
+        response = self.client.post(reverse("reject_budget_change", args=[self.proposal.id]))
+
+        self.assertRedirects(response, reverse("approvals"), fetch_redirect_response=False)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.REJECTED)
+        self.kid.refresh_from_db()
+        self.assertIsNone(self.kid.daily_budget_minutes)
+
+    def test_kid_approve_gets_403_and_makes_no_state_change(self):
+        self._select(self.kid)
+
+        response = self.client.post(reverse("approve_budget_change", args=[self.proposal.id]))
+
+        self.assertEqual(response.status_code, 403)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.PENDING)
+        self.kid.refresh_from_db()
+        self.assertIsNone(self.kid.daily_budget_minutes)
+
+    def test_kid_reject_gets_403_and_makes_no_state_change(self):
+        self._select(self.kid)
+
+        response = self.client.post(reverse("reject_budget_change", args=[self.proposal.id]))
+
+        self.assertEqual(response.status_code, 403)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ProposalStatus.PENDING)

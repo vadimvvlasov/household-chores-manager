@@ -1,7 +1,9 @@
 from django.contrib.auth.models import User
+from django.http import HttpResponse
 from django.test import TestCase
 from django.urls import reverse
 
+from .decorators import adult_required
 from .models import Person
 
 
@@ -241,3 +243,29 @@ class LoginAndActivePersonTests(TestCase):
         response = self.client.get("/")
 
         self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
+
+class AdultRequiredDecoratorTests(TestCase):
+    def setUp(self):
+        self.adult = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.kid = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.view = adult_required(lambda request: HttpResponse("ok"))
+
+    def _request_with_active_person(self, active_person):
+        return type("FakeRequest", (), {"active_person": active_person})()
+
+    def test_adult_active_person_passes_through_to_the_view(self):
+        response = self.view(self._request_with_active_person(self.adult))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"ok")
+
+    def test_kid_active_person_gets_403(self):
+        response = self.view(self._request_with_active_person(self.kid))
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_no_active_person_gets_403(self):
+        response = self.view(self._request_with_active_person(None))
+
+        self.assertEqual(response.status_code, 403)
