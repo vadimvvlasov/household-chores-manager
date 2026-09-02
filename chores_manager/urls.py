@@ -23,6 +23,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("", include("people.urls")),
     path("", chores_views.dashboard, name="home"),
+    path("calendar/", chores_views.calendar_view, name="calendar"),
     path("chores/", include("chores.urls")),
     path("assignments/new/", chores_views.assignment_edit, name="assignment_new"),
     path(

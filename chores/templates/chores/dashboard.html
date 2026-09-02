@@ -49,6 +49,8 @@
         {% endfor %}
     </ul>
 
+    <p><a href="{% url 'calendar' %}">Calendar</a></p>
+
     <form method="post" action="{% url 'logout' %}">
         {% csrf_token %}
         <button type="submit">Log out</button>

@@ -26,6 +26,67 @@ from .services import (
 )
 
 
+def calendar_view(request):
+    """`GET /calendar/?week=YYYY-MM-DD` — a whole week's chore blocks per day.
+
+    `week` names any date in the target week; a missing or unparsable value
+    (anything `datetime.strptime(value, "%Y-%m-%d")` can't parse) defaults to
+    the current week's Sunday. Materializes that week's instances (lazy,
+    idempotent — see `ensure_instances_generated`) before rendering.
+
+    Groups the week's `ChoreInstance` rows by day, oldest first. Action
+    controls (check-off/uncheck/log-time/swap) render per day, only for days
+    whose date is today or later — the same `date < today` guard already
+    enforced server-side by the individual action views, just not rendered
+    here when it would be rejected anyway. A week entirely in the past (its
+    Sunday before the current week's Sunday) is read-only for every day; the
+    current week additionally reads-only for its already-past days while
+    still rendering controls for today and any later days.
+    """
+    raw_week = request.GET.get("week")
+    try:
+        requested_date = datetime.datetime.strptime(raw_week, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        requested_date = timezone.localdate()
+
+    week_start = week_start_of(requested_date)
+    ensure_instances_generated(week_start)
+
+    today = timezone.localdate()
+    instances = (
+        ChoreInstance.objects.filter(date__gte=week_start, date__lte=week_start + datetime.timedelta(days=6))
+        .select_related("chore", "assigned_person")
+        .order_by("date", "scheduled_start")
+    )
+
+    instances_by_date = {}
+    for instance in instances:
+        instances_by_date.setdefault(instance.date, []).append(instance)
+
+    days = [
+        {
+            "date": week_start + datetime.timedelta(days=offset),
+            "instances": instances_by_date.get(week_start + datetime.timedelta(days=offset), []),
+            "is_editable": (week_start + datetime.timedelta(days=offset)) >= today,
+        }
+        for offset in range(7)
+    ]
+
+    prev_week = week_start - datetime.timedelta(days=7)
+    next_week = week_start + datetime.timedelta(days=7)
+
+    return render(
+        request,
+        "chores/calendar.html",
+        {
+            "week_start": week_start,
+            "days": days,
+            "prev_week": prev_week,
+            "next_week": next_week,
+        },
+    )
+
+
 def dashboard(request):
     """`GET /` — today's chores for the whole household.
 

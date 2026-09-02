@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Calendar — Household Chores Manager</title>
+</head>
+<body>
+    <h1>Week of {{ week_start }}</h1>
+
+    <p>
+        <a href="{% url 'calendar' %}?week={{ prev_week|date:'Y-m-d' }}">&laquo; Previous week</a>
+        &nbsp;|&nbsp;
+        <a href="{% url 'calendar' %}?week={{ next_week|date:'Y-m-d' }}">Next week &raquo;</a>
+    </p>
+
+    {% for day in days %}
+        <h2>{{ day.date|date:"l, Y-m-d" }}</h2>
+        <ul>
+            {% for instance in day.instances %}
+                <li>
+                    <strong>{{ instance.chore.name }}</strong>
+                    — {{ instance.assigned_person.name }}
+                    — {{ instance.scheduled_start|time:"H:i" }}
+                    — {{ instance.budgeted_minutes }} min
+                    — {% if instance.is_done %}Done{% else %}Not done{% endif %}
+
+                    {% if day.is_editable %}
+                        {% if instance.is_done %}
+                            <form method="post" action="{% url 'uncheck_instance' instance.id %}">
+                                {% csrf_token %}
+                                <button type="submit">Uncheck</button>
+                            </form>
+                        {% else %}
+                            <form method="post" action="{% url 'check_instance' instance.id %}">
+                                {% csrf_token %}
+                                <button type="submit">Check off</button>
+                            </form>
+                        {% endif %}
+
+                        <a href="{% url 'log_time' instance.id %}">Log time</a>
+                        <a href="{% url 'swap' instance.id %}">Swap</a>
+                    {% endif %}
+                </li>
+            {% empty %}
+                <li>No chores scheduled.</li>
+            {% endfor %}
+        </ul>
+    {% endfor %}
+
+    <p><a href="{% url 'home' %}">Back to today's chores</a></p>
+</body>
+</html>
