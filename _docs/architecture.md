@@ -1,34 +1,30 @@
 # Household Chores Manager — v1 Implementation Plan
 
-## Context confirmed from repo
-
-Repo currently has only `README.md` and `_docs/plan.md` — no `pyproject.toml`, no Django project scaffolded yet, single commit (`cdcfd01 chore: Initialize project with documentation and configuration`). README already documents the target commands (`uv sync`, `uv run python manage.py migrate/runserver/test`), so the plan below is designed to make those commands true from milestone 0 onward.
+Revision note (2nd pass — "make it easier"): dropped HTMX entirely (plain
+full-page forms), dropped the `Swap` audit model (a swap is just a direct
+reassignment), dropped `TimeBudget` as its own model (two fields on `Person`
+instead), dropped the dedicated history feature (the calendar view's own
+prev/next navigation *is* the history view — past weeks just render
+read-only). First-pass simplifications kept: 2 apps, concrete proposal
+models instead of generic `ContentType`, no template/budget versioning, no
+PIN guard.
 
 ---
 
 ## 1. Project / app layout
 
-**Project package:** `chores_manager` (settings/urls/wsgi/asgi), `manage.py` at repo root — flat layout, no `src/` nesting, since this is a small single-deployable app.
+**Project package:** `chores_manager` (already scaffolded), `manage.py` at repo root.
 
-**Apps** (4, each with a clear single responsibility, avoiding one giant app but also avoiding over-fragmentation):
+**Apps** (2):
 
 | App | Responsibility |
 |---|---|
-| `people` | The single shared `auth.User` login flow, the 4 `Person` profiles, session-based "active person" middleware/context processor, profile picker, optional adult PIN guard. |
-| `chores` | `Chore`, `WeeklyAssignmentTemplate`, `ChoreInstance`, `TimeLog`, `Swap`, instance-generation service, dashboard view, calendar view, notification computation, history view. This is the largest app because check-off/swap/time-log/calendar/notifications/history all revolve around `ChoreInstance` and benefit from living together. |
-| `budgets` | `TimeBudget` (daily/weekly caps per person), aggregation + warning-computation services. Kept separate from `chores` because it's a genuinely distinct domain concept (a cap on a person, not a property of a chore) and because both `chores` view code and the approval flow need to read it without a circular "budgets depends on chores depends on budgets" import problem. |
-| `approvals` | The generic pending-change queue (`Proposal`) used by *both* `chores` (assignment edits) and `budgets` (budget edits). Implemented once, using `django.contrib.contenttypes` so it doesn't need to know about assignment/budget internals. Kept as its own app specifically so it can sit "above" `chores` and `budgets` without either of them depending on the other. |
+| `people` | The single shared `auth.User` login, the 4 `Person` profiles (incl. their time budget fields), session-based "active person" middleware/context processor, profile picker. |
+| `chores` | `Chore`, `WeeklyAssignmentTemplate`, `ChoreInstance`, `TimeLog`, `ProposedAssignmentChange`, `ProposedBudgetChange`, instance-generation + apply services, dashboard/calendar/approval-queue views, notification computation. |
 
-Rejected alternative: a single monolithic `chores` app holding everything. Rejected because the approval mechanism genuinely needs to be generic across two unrelated target models, and jamming that plus calendar/notifications/budgets into one app file set would get hard to navigate for a 9-milestone build.
+**Dependencies (via `uv add`):** just `django` (already added). No `django-htmx`, no CSS framework, no JS bundler, no calendar JS library, no Celery/cron, no DRF, no Postgres (SQLite).
 
-No DRF/API app — this is server-rendered Django templates + HTMX only, per the fixed stack decision.
-
-**Dependencies (via `uv add`):**
-- `django`
-- `django-htmx` (gives `request.htmx` boolean + `HX-*` response helpers, used to decide partial vs. full-page render)
-- Dev-only (`uv add --dev`): `time-machine` (or `freezegun`) for deterministic "now" in notification/budget tests.
-
-No CSS framework, no JS bundler, no calendar JS library, no Celery/cron, no DRF — all consistent with the fixed constraints.
+Every interactive action (check-off, log time, swap, propose, approve/reject) is a plain `<form method="post">` → view → `redirect()` back to the page it came from. No partial templates, no polling, no JS beyond whatever the browser gives you for free.
 
 ---
 
@@ -39,137 +35,109 @@ No CSS framework, no JS bundler, no calendar JS library, no Celery/cron, no DRF 
 **`Person`**
 - `name` (CharField)
 - `role` (CharField choices: `ADULT`, `KID`)
-- `pin_hash` (CharField, blank/null) — see auth section
-- `is_active` (bool, default True) — soft-deactivate instead of delete, since every other model FKs to `Person` and history must survive.
+- `daily_budget_minutes` (PositiveInteger, nullable = no cap set)
+- `weekly_budget_minutes` (PositiveInteger, nullable = no cap set)
+- `is_active` (bool, default True) — soft-deactivate, since other models FK to `Person`
 - `created_at`
+
+Budgets live directly on `Person` rather than a separate model: there's only ever *one current* daily cap and *one current* weekly cap per person, so it's two nullable integer columns, not a table. Editing them (adult direct, or kid via proposal) is a plain `Person.save()` — see `ProposedBudgetChange` below.
+
+No PIN field — trust-based profile picker (see §3).
 
 ### `chores` app
 
-**`Chore`** — the reusable "what": `name`, `description` (blank), `default_duration_minutes` (nullable, just a convenience default for new template slots), `is_active`, `created_at`.
+**`Chore`** — `name`, `description` (blank), `default_duration_minutes` (nullable), `is_active`, `created_at`.
 
-**`WeeklyAssignmentTemplate`** — the recurring "who/when" slot. This is versioned with effective-dating so that reconstructing "what was the plan on date X" is always possible even for weeks where nobody visited the app (instances are lazily generated, so the template itself is sometimes the only historical record for a stale week):
+**`WeeklyAssignmentTemplate`** — the recurring "who/when" slot, a plain mutable row:
 - `chore` FK
 - `assigned_to` FK Person
-- `day_of_week` (IntegerChoices, **Sunday = 0 … Saturday = 6**, matching the "week starts Sunday" requirement)
-- `start_time` (TimeField) — needed for calendar time blocks and "starting soon" notifications
-- `duration_minutes` (PositiveSmallInteger) — budgeted length of this specific chore occurrence
-- `effective_from` (Date, always a Sunday)
-- `effective_to` (Date, null = currently active)
-- `created_by` FK Person, `created_at`
+- `day_of_week` (IntegerChoices, **Sunday = 0 … Saturday = 6**)
+- `start_time` (TimeField)
+- `duration_minutes` (PositiveSmallInteger)
+- `updated_at`, `updated_by` FK Person
 
-**`ChoreInstance`** — the materialized, checkable, swappable, loggable per-date row. Generated from the template that was active for that week; **never mutated by later template edits**, which is the core mechanism that keeps history accurate:
+Editing this only ever affects instances generated *after* the edit — `ChoreInstance` already snapshots what it needs, so the template doesn't need version history of its own.
+
+**`ChoreInstance`** — the per-date checkable/loggable/swappable row:
 - `template` FK (protect on delete)
-- `chore` FK (denormalized reference for convenience/query simplicity)
+- `chore` FK (denormalized)
 - `date` (Date)
-- `scheduled_start` (DateTimeField, computed at generation time from `date` + `template.start_time`, timezone-aware) — stored as a full datetime specifically so notification range-queries don't have to deal with time-only comparisons across midnight
+- `scheduled_start` (DateTimeField, timezone-aware; `date` + `template.start_time` at generation time)
 - `budgeted_minutes` (int, copied from template at generation time)
-- `assigned_person` FK Person — the *currently* responsible person; this is what swaps mutate
-- `original_person` FK Person — snapshot of who the template assigned, kept even after a swap, for audit ("Kid1 was supposed to do this, Kid2 actually did")
+- `assigned_person` FK Person — this is what a swap changes; no separate audit row, the current value plus `TimeLog`/`done_by` already show who actually did the work regardless of who was originally slotted
 - `is_done` (bool, default False), `done_at` (nullable), `done_by` FK Person (nullable)
 - `created_at`
-- `unique_together = (template, date)` — makes generation idempotent via `get_or_create`.
+- `unique_together = (template, date)` — idempotent generation via `get_or_create`.
 
-**`TimeLog`** — actual time spent, multiple entries allowed per instance (sum them for "actual minutes"):
+Swap = one line: `instance.assigned_person = new_person; instance.save()`, guarded (in `chores/services.py::swap_assignment`) to only allow it when `instance.date >= today` and `not instance.is_done`. No separate `Swap` model, no swap history table — if that's missed later it's a 3-field model to add back, not a redesign.
+
+**`TimeLog`** — actual time spent, multiple entries per instance:
 - `chore_instance` FK (related_name `time_logs`)
 - `logged_by` FK Person
 - `minutes` (PositiveInteger)
 - `logged_at` (DateTime, default now)
 - `note` (CharField, blank)
 
-**`Swap`** — audit record of an instant reassignment (the mutation itself happens on `ChoreInstance.assigned_person`; this table is the "why does history look different from the template" trail):
-- `chore_instance` FK
-- `from_person`, `to_person` FK Person
-- `swapped_by` FK Person
-- `swapped_at` (DateTime, default now)
-- `note` (blank)
+`chores/services.py`: `minutes_logged_today(person, on_date)` / `minutes_logged_this_week(person, week_start)` sum `TimeLog.minutes` via `ChoreInstance.assigned_person`. `is_over_budget(person, period, on_date)` compares to `person.daily_budget_minutes`/`weekly_budget_minutes` (skip the check entirely if the field is `None`) — a plain bool for a warning badge, **never blocking**.
 
-Business rule (enforced in the view, not just the template): swaps are only allowed on instances dated today-or-future and not yet `is_done`, so past/completed history can't be silently rewritten by a swap either.
+**`ProposedAssignmentChange`**:
+- `target_template` FK, nullable (null = new slot)
+- `chore`, `assigned_to`, `day_of_week`, `start_time`, `duration_minutes` — proposed values as plain typed fields
+- `proposed_by` FK Person, `proposed_at`
+- `status` (`PENDING`/`APPROVED`/`REJECTED`, default `PENDING`)
+- `reviewed_by` FK Person (null), `reviewed_at` (null), `note` (blank)
 
-### `budgets` app
+**`ProposedBudgetChange`**:
+- `person` FK — whose budget
+- `daily_budget_minutes`, `weekly_budget_minutes` (nullable — only the changed one needs to be set; `None` means "leave that one alone")
+- `proposed_by`, `proposed_at`, `status`, `reviewed_by`, `reviewed_at`, `note` — same shape
 
-**`TimeBudget`** — same effective-dating pattern as the assignment template, for the same reason (accurate historical "what was the cap" even for weeks nobody generated instances for):
-- `person` FK
-- `period` (choices `DAILY` / `WEEKLY`)
-- `minutes` (PositiveInteger)
-- `effective_from` (Date, Sunday-aligned for `WEEKLY`, any date for `DAILY`)
-- `effective_to` (Date, null = active)
-- `created_by` FK Person, `created_at`
-
-Aggregation lives in `budgets/services.py`: `minutes_logged_today(person, on_date)` and `minutes_logged_this_week(person, week_start)` — both just sum `TimeLog.minutes` joined through `ChoreInstance` filtered by `assigned_person`/`date`. `is_over_budget(person, period, on_date)` compares that sum to the active `TimeBudget` row and returns a plain bool used only for a warning badge — it **never blocks** any check-off or logging action, per spec.
-
-### `approvals` app
-
-**`Proposal`** — the one generic pending-change mechanism for both assignment edits and budget edits, using `django.contrib.contenttypes` instead of two near-duplicate models:
-- `proposed_by` FK Person
-- `proposed_at` (DateTime)
-- `status` (choices `PENDING` / `APPROVED` / `REJECTED`, default `PENDING`)
-- `reviewed_by` FK Person (null), `reviewed_at` (null)
-- `content_type` FK `ContentType`, `object_id` (nullable int) → `GenericForeignKey('content_type', 'object_id')` pointing at the existing `WeeklyAssignmentTemplate` or `TimeBudget` row being replaced (null for a brand-new slot/budget)
-- `action` (choices `CREATE` / `UPDATE` / `DEACTIVATE`)
-- `payload` (JSONField) — the proposed new field values, e.g. `{"assigned_to_id": 3, "day_of_week": 2, "start_time": "17:30", "duration_minutes": 20}`
-- `effective_from` (Date) — defaults to *next* week's Sunday, computed at proposal-creation time via the shared `week_start_of()` helper (see below)
-- `note` (blank text, optional justification)
-
-`Proposal.apply(applied_by)` dispatches on `content_type`/`action`/`payload` and calls into `chores/services.py::apply_assignment_change(...)` or `budgets/services.py::apply_budget_change(...)`. Those two service functions are the **single source of truth for mutating a template/budget** (deactivate the old effective-dated row, insert the new one) — they're called both from `Proposal.apply()` and directly from an adult's "edit" view, so "adult changes apply immediately" and "kid changes apply after approval" are just two callers of the same function, never duplicated logic. `Proposal.reject(reviewed_by, note)` just flips status, no data mutation.
-
-**Explicit simplification (recommend stating this to the user up front):** assignment/budget template edits — whether direct (adult) or approved (kid's proposal) — take effect starting the *next* week's instance generation, never retroactively touching a week whose `ChoreInstance` rows already exist. If you need to change *today's* assignment right now, that's what a `Swap` is for. This keeps instance generation simple/idempotent and avoids ambiguous "did this week's remaining days already lock in the old plan or not" states.
+`chores/services.py::apply_assignment_change(...)` (creates/updates the target `WeeklyAssignmentTemplate`) and `apply_budget_change(...)` (sets the relevant field(s) on `Person`) are the single source of truth for mutating live data — called both directly from an adult's edit view and from a proposal's `.approve(reviewed_by)`. `.reject(reviewed_by, note)` just flips status.
 
 ### Shared date utility
 
-`chores/dateutils.py::week_start_of(d)` → the Sunday of the week containing `d`, using `d - timedelta(days=d.isoweekday() % 7)`. Used everywhere: template/budget `effective_from` computation, instance generation, calendar prev/next navigation, history grouping. Having exactly one implementation of this matters given "week starts Sunday" touches almost every model.
+`chores/dateutils.py::week_start_of(d)` → the Sunday of the week containing `d`. Used for instance generation and calendar prev/next navigation.
 
 ---
 
 ## 3. Auth & session profile-picker
 
-- Single Django `auth.User` created once via `uv run python manage.py createsuperuser` (documented in README) — this is the shared family login, unrelated to the 4 `Person` rows.
-- `people/middleware.py::ActivePersonMiddleware` — after Django's `AuthenticationMiddleware`, reads `request.session.get('active_person_id')`, sets `request.active_person` to the matching `Person` or `None`. Redirects unauthenticated-active-person requests to the picker, except for the picker/login/logout/static URLs themselves (an allowlist).
-- `people/context_processors.py::active_person` — exposes `active_person` and a boolean `is_adult` in every template, so templates can conditionally show adult-only controls (approval buttons, etc.) without every view passing it explicitly.
-- `people/decorators.py::require_active_person` — for views that assume `request.active_person` is set (defense in depth beyond the middleware for anything exempted from it).
-- `people/decorators.py::adult_required` — for approval/reject POST handlers; returns 403 if `request.active_person.role != ADULT`. **This check must be server-side, not just a hidden button in the template**, since the picker is trust-based and a kid could otherwise switch to an adult profile in the UI or simply POST directly to the endpoint.
-- **Adult-switch guard (recommendation):** since there's no real security boundary needed but the approval workflow's entire point is defeated if a kid can freely become "Mom" and self-approve, add an *optional* 4-digit PIN per adult `Person` (`pin_hash`, hashed with Django's `make_password`/`check_password`). Switching to a profile with no PIN set is free (default for kids, and optionally for adults who don't care). Switching to a profile *with* a PIN set requires entering it in a small form on the picker. This is intentionally light — not a real auth system, just enough friction that a 12-16 year old can't casually rubber-stamp their own proposal.
-- Logout should also clear `active_person_id` from the session (log out = fully reset, not just the Django auth session).
+- Single Django `auth.User` via `uv run python manage.py createsuperuser` — the shared family login, unrelated to the 4 `Person` rows.
+- `people/middleware.py::ActivePersonMiddleware` — reads `request.session['active_person_id']`, sets `request.active_person`. Redirects to the picker if unset (allowlist: picker/login/logout/static/admin).
+- `people/context_processors.py::active_person` — exposes `active_person`/`is_adult` to every template.
+- `people/decorators.py::adult_required` — 403 if `request.active_person.role != ADULT`. Used only on the approve/reject views. Server-side because the picker itself is trust-based (anyone can pick any profile) — this check stops a kid from *posting directly* to an approve URL; it doesn't stop them picking an adult's profile in the UI, which is an accepted v1 trade-off for a family app with no real security boundary.
+- Logout clears `active_person_id` too.
 
 ---
 
 ## 4. Views / URLs per feature
 
-`H` = HTMX partial response (used for in-place swap), `F` = full page render.
+All full-page renders (`F`) — plain forms, redirect after POST.
 
-| Feature | Method + URL | View | Response |
-|---|---|---|---|
-| Login | `GET/POST /login/` | `django.contrib.auth.views.LoginView` (custom template) | F |
-| Logout | `POST /logout/` | `LogoutView` subclass clearing `active_person_id` | F (redirect) |
-| Profile picker | `GET /profile/` | `ProfilePickerView` | F |
-| Select profile (+ PIN if set) | `POST /profile/select/` | `SelectProfileView` | F (redirect to dashboard) |
-| Dashboard (today's checklist, all 4 people, notification banner) | `GET /` | `dashboard_view` | F (includes the notifications partial on first render) |
-| Notifications banner (polling refresh) | `GET /notifications/partial/` | `notifications_partial_view` | H, `hx-trigger="every 45s"` |
-| Check off a chore | `POST /chores/<instance_id>/check/` | `check_off_view` | H (updated instance card) |
-| Uncheck (mistake correction) | `POST /chores/<instance_id>/uncheck/` | same view, toggled | H |
-| Log time form | `GET /chores/<instance_id>/log-time/` | `log_time_form_view` | H (inline form) |
-| Submit time log | `POST /chores/<instance_id>/log-time/` | `log_time_submit_view` | H (updated card w/ new total + budget badge) |
-| Swap form | `GET /chores/<instance_id>/swap/` | `swap_form_view` | H |
-| Submit swap | `POST /chores/<instance_id>/swap/` | `swap_submit_view` | H |
-| Weekly calendar | `GET /calendar/?week=YYYY-MM-DD` | `calendar_view` (calls `ensure_instances_generated`) | F |
-| History index | `GET /history/` | `history_index_view` | F |
-| History week detail (read-only) | `GET /history/<week_start>/` | `history_week_view` — reuses calendar template with `read_only=True` | F |
-| Assignment template list | `GET /assignments/` | `assignment_list_view` | F |
-| Assignment edit form | `GET /assignments/<id>/edit/` | `assignment_edit_form_view` | H or F (works both embedded and as direct URL) |
-| Submit assignment edit | `POST /assignments/<id>/edit/` | `assignment_edit_submit_view` — branches: adult → `apply_assignment_change()` immediately; kid → creates `Proposal` | H |
-| New assignment slot | `GET/POST /assignments/new/` | `assignment_create_view` — same branch | F/H |
-| Budget list | `GET /budgets/` | `budget_list_view` | F |
-| Budget edit | `GET/POST /budgets/<id>/edit/` | `budget_edit_view` — same immediate-vs-proposal branch | H/F |
-| Approval queue | `GET /approvals/` | `approval_queue_view` — everyone can view (full visibility); action buttons only rendered for adults | F |
-| Approve | `POST /approvals/<id>/approve/` | `approve_view`, `@adult_required` | H |
-| Reject | `POST /approvals/<id>/reject/` | `reject_view`, `@adult_required` | H |
+| Feature | Method + URL | View |
+|---|---|---|
+| Login | `GET/POST /login/` | `LoginView` (custom template) |
+| Logout | `POST /logout/` | `LogoutView` subclass clearing `active_person_id` |
+| Profile picker | `GET /profile/` | `ProfilePickerView` |
+| Select profile | `POST /profile/select/` | `SelectProfileView` → redirect to dashboard |
+| Dashboard (today's checklist + notifications) | `GET /` | `dashboard_view` — recomputes notifications fresh on every load |
+| Check off / uncheck | `POST /chores/<instance_id>/check/`, `.../uncheck/` | `check_off_view` → redirect back |
+| Log time | `GET/POST /chores/<instance_id>/log-time/` | `log_time_view` |
+| Swap | `GET/POST /chores/<instance_id>/swap/` | `swap_view` → `swap_assignment()` service, redirect back |
+| Weekly calendar (also serves as history) | `GET /calendar/?week=YYYY-MM-DD` | `calendar_view` — calls `ensure_instances_generated`; if `week < this week`, renders with all action forms omitted/rejected (see below) |
+| Assignment list / edit / new | `GET /assignments/`, `GET/POST /assignments/<id>/edit/`, `/assignments/new/` | adult → `apply_assignment_change()` immediately; kid → creates `ProposedAssignmentChange` |
+| Budget edit | `GET/POST /people/<person_id>/budget/` | same immediate-vs-proposal branch, via `ProposedBudgetChange` |
+| Approval queue | `GET /approvals/` | lists pending `ProposedAssignmentChange` + `ProposedBudgetChange`; visible to everyone, action buttons adult-only |
+| Approve / reject assignment | `POST /approvals/assignment/<id>/approve/`, `.../reject/` | `@adult_required` |
+| Approve / reject budget | `POST /approvals/budget/<id>/approve/`, `.../reject/` | `@adult_required` |
+
+No `/history/` URLs at all — `calendar_view` with `?week=` pointing at a past Sunday **is** the history view. Past-week read-only-ness isn't a template flag threaded through, it's the same server-side guard `check_off_view`/`log_time_view`/`swap_view` already need anyway (`instance.date < today` → reject), so there's exactly one place that rule lives, and the calendar template just doesn't render action buttons for instances that would be rejected.
 
 ---
 
 ## 5. In-app notification computation
 
-No new persistent model — everything is derivable from `ChoreInstance.scheduled_start`/`is_done` plus the current time, and the spec doesn't ask for per-notification dismissal state (if it later does, a small `DismissedNotification(person, chore_instance, dismissed_at)` table would be the minimal addition — not needed for v1).
-
-`chores/notifications.py`:
+No new model — derived from `ChoreInstance.scheduled_start`/`is_done` and the current time, recomputed on every full-page load of `/` (no polling, since there's no HTMX):
 
 ```
 get_upcoming_blocks(now, lookahead_minutes=30):
@@ -187,38 +155,35 @@ get_unfinished_today(now):
     ).order_by("scheduled_start")
 ```
 
-Both are plain functions called from `dashboard_view` and from `notifications_partial_view` — same code path for the initial page load and the HTMX poll, so there's exactly one implementation to test. `now` is always `django.utils.timezone.localtime(timezone.now())` with `USE_TZ = True` and `TIME_ZONE` set to the family's actual zone in settings (needs to be filled in — not specified in the product spec).
-
-The dashboard template renders two sections from these: "Starting soon" (from `get_upcoming_blocks`) and "Not done yet today" (from `get_unfinished_today`), each showing chore name, assigned person, and scheduled time. The `/notifications/partial/` endpoint polls every ~45s via `hx-trigger="every 45s"` so the banner is "live" without any background job, satisfying the no-Celery/no-cron constraint directly.
+`now` = `timezone.localtime(timezone.now())`, `USE_TZ = True`, `TIME_ZONE` set to the family's zone in settings. "Live" here means "correct whenever you load or refresh the page" — no auto-refresh, which is the actual complexity this cut removes (no polling loop, no partial endpoint).
 
 ---
 
 ## 6. Admin / seed data
 
-- Register every model in each app's `admin.py`. This gives parents a power-user escape hatch (e.g. fixing a bad time log) without needing a dedicated UI for every edge case in v1.
-- The shared login `User` is created via Django's built-in `uv run python manage.py createsuperuser` — no custom code needed, and it's already documented as a `manage.py` command pattern.
-- Domain seed data (the 4 `Person` rows, starter `Chore`s, and starter `WeeklyAssignmentTemplate` slots) needs a **custom, idempotent management command** since there's no signup flow and admin alone doesn't give a repeatable "set up a fresh household" path:
-  - `people/management/commands/seed_family.py` — `get_or_create`s the 2 adults + 2 kids (names/roles either hardcoded as a documented starting point or read from a small local JSON the family edits before running it).
-  - `chores/management/commands/seed_chores.py` — creates a handful of starter `Chore` + `WeeklyAssignmentTemplate` rows (e.g. dishes, trash, laundry) so the app isn't empty on first run.
-  - Both commands live behind a shared `seed_default_family()` / `seed_default_chores()` function (in `people/seed.py`, `chores/seed.py`) so tests can call the exact same seeding logic in `setUp()` instead of maintaining a second copy of "what a valid household looks like."
+- Register every model in each app's `admin.py`.
+- Shared login `User` via `createsuperuser`.
+- `people/management/commands/seed_family.py` — `get_or_create`s the 2 adults + 2 kids.
+- `chores/management/commands/seed_chores.py` — a handful of starter `Chore` + `WeeklyAssignmentTemplate` rows.
+- Both backed by `seed_default_family()` / `seed_default_chores()` functions so tests reuse the same seeding logic in `setUp()`.
 
 ---
 
 ## 7. Testing strategy
 
-All via `django.test.TestCase` + Django's test client, runnable with the existing `uv run python manage.py test`.
+Via `django.test.TestCase` + Django's test client, `uv run python manage.py test`.
 
-- **`people`**: profile picker sets session correctly; PIN required/rejected/accepted for adult profiles with a PIN set; logout clears `active_person_id`; middleware redirects to picker when no active person.
-- **`chores` — model/service logic**:
-  - `ensure_instances_generated(week_start)` is idempotent (calling twice doesn't duplicate rows) and only generates from templates whose effective range covers that week.
-  - **History-integrity test (the most important one)**: generate week 1 from template v1, then apply a template edit (creating v2 effective week 2); assert week 1's `ChoreInstance` rows are byte-for-byte unchanged (`assigned_person`, `budgeted_minutes`, `scheduled_start`), and week 2 generation uses v2.
-  - Check-off sets `is_done`/`done_by`/`done_at`; un-check reverses it.
-  - Multiple `TimeLog` entries sum correctly for a given instance/day/week.
-  - Swap: updates `assigned_person` immediately, creates a `Swap` row, is blocked (service-level, not just UI) for past or already-done instances.
-- **`budgets`**: `is_over_budget` boundary cases (exactly at limit = no warning, one minute over = warning); asserts that being over budget never prevents check-off or time-log submission (call the view, assert 200/redirect + DB write still happened).
-- **`approvals`**: kid-proposed assignment/budget change creates a `PENDING` `Proposal` and does **not** mutate the live template/budget; adult direct edit mutates immediately without ever creating a `Proposal`; approving applies via the shared service function and only affects the *next* week's generation, not already-generated instances; rejecting leaves live data untouched; **an explicit test that POSTing directly to `/approvals/<id>/approve/` as a kid-active-session returns 403**, since that's the one place a URL-guessing attack against the trust-based picker would matter.
-- **`chores.notifications`**: use `time-machine`/`freezegun` to fix "now" and assert `get_upcoming_blocks`/`get_unfinished_today` boundaries (just inside window, just outside, exactly at start, midnight-crossing) — this is the logic most prone to off-by-one/timezone bugs and least likely to be caught by manual testing.
-- **View-level integration tests**: use `self.client.session["active_person_id"] = person.id; session.save()` to simulate each role (adult/kid) hitting the propose/approve/swap/check-off endpoints end-to-end.
+- **`people`**: profile picker sets session; logout clears it; middleware redirects when unset.
+- **`chores`**:
+  - `ensure_instances_generated(week_start)` idempotent.
+  - Snapshot-integrity: generate a week, edit the template, assert already-generated instances unchanged; a later week's generation picks up the edit.
+  - Check-off/uncheck; multiple `TimeLog` entries sum correctly.
+  - `swap_assignment` reassigns immediately; rejected for past or already-done instances.
+  - `is_over_budget` boundary cases (at limit = no warning, one over = warning; `None` budget = never warns); over-budget never blocks check-off/time-log.
+  - Kid-proposed change creates a `PENDING` row, doesn't mutate live data; adult edit mutates immediately, never creates a proposal; approve calls the shared apply function; reject leaves data untouched; POSTing an approve URL as a kid returns 403.
+  - `get_upcoming_blocks`/`get_unfinished_today` boundaries via `time-machine` (just inside/outside window, exactly at start, midnight-crossing).
+  - Past-week guard: POSTing check-off/log-time/swap against a `ChoreInstance` dated before today is rejected, for both calendar-rendered and direct-URL access.
+- **View-level integration tests**: `self.client.session["active_person_id"] = person.id; session.save()` per role, end-to-end through propose/approve/swap/check-off.
 
 ---
 
@@ -226,22 +191,23 @@ All via `django.test.TestCase` + Django's test client, runnable with the existin
 
 | # | Milestone | Acceptance |
 |---|---|---|
-| 0 | Scaffold: `uv init`, `uv add django django-htmx`, `django-admin startproject chores_manager .`, base settings (`TIME_ZONE`, `django_htmx` middleware), root urls, placeholder view. | `uv sync`, `manage.py migrate`, `manage.py runserver`, `manage.py test` all work per README. |
-| 1 | `people` app: `Person` model, admin, `ActivePersonMiddleware` + context processor, login + profile picker (+ optional PIN), `seed_family` command. | Can log in with the shared account, pick a profile, have it persist across requests; logout resets it. |
-| 2 | `chores` core: `Chore`, `WeeklyAssignmentTemplate`, `ChoreInstance`, `ensure_instances_generated()`, `seed_chores` command, admin registration. | Visiting a week auto-generates its instances exactly once (idempotency test passes). |
-| 3 | Check-off + time log: HTMX endpoints, dashboard renders today's checklist per person with running actual-minutes total. | HTMX partial swap works without a full reload; check-off/log-time tests pass. |
-| 4 | `budgets` app: `TimeBudget`, aggregation services, non-blocking warning badges on dashboard. | Over-budget never blocks an action; boundary tests pass. |
-| 5 | Swaps: `Swap` model, form/endpoint, guarded against past/completed instances. | Swap reassigns instantly and is visible to both old and new assignee; audit row created. |
-| 6 | `approvals` app: `Proposal` (ContentType-based), shared `apply_assignment_change`/`apply_budget_change` services, propose/edit views branching on role, approval queue with server-side adult guard. | Kid change sits pending until approved; adult change applies immediately; 403 test for non-adult approve attempt passes. |
-| 7 | Calendar view: server-rendered week grid (simple per-day ordered list of time blocks, not an hour-by-hour pixel grid — satisfies "shows only chore time blocks" with far less template/CSS complexity), prev/next navigation. | Grid shows only that week's blocks; navigating triggers lazy generation for newly-viewed weeks. |
-| 8 | In-app notifications: `chores/notifications.py`, dashboard banner, HTMX polling partial. | Starting-soon and unfinished-today sections update correctly on poll; timezone/midnight edge tests pass. |
-| 9 | History view: index of past weeks + read-only week detail reusing the calendar template with actions hidden and blocked server-side. | Past weeks display unchanged even after later template edits; direct POST attempts to check-off/swap a past instance are rejected server-side, not just hidden in the UI. |
+| 0 | Scaffold (done) | `uv sync`, `manage.py migrate/runserver/test` work. |
+| 1 | `people`: `Person` (incl. budget fields), admin, `ActivePersonMiddleware` + context processor, login + picker, `seed_family`. | Log in, pick a profile, it persists; logout resets it. |
+| 2 | `chores` core: `Chore`, `WeeklyAssignmentTemplate`, `ChoreInstance`, `ensure_instances_generated()`, `seed_chores`, admin. | Visiting a week generates its instances exactly once. |
+| 3 | Check-off + time log: plain-form views, dashboard checklist per person. | Check-off/log-time tests pass, full page redirect works. |
+| 4 | Budget warning badges using `Person.daily_budget_minutes`/`weekly_budget_minutes`. | Over-budget never blocks an action; boundary tests pass. |
+| 5 | Swap: `swap_assignment()` service + form, guarded against past/done instances. | Swap reassigns instantly; guard tests pass. |
+| 6 | `ProposedAssignmentChange`/`ProposedBudgetChange` + apply services + propose/edit views branching on role + approval queue. | Kid change pends until approved; adult change applies immediately; 403 test passes. |
+| 7 | Calendar view (doubles as history): server-rendered week grid, prev/next nav, past-week read-only via the shared date guard. | Grid shows only that week's blocks; past weeks show unchanged after later template edits; action POSTs against past instances rejected. |
+| 8 | Notifications: `chores/notifications.py`, dashboard sections, recomputed per page load. | Starting-soon/unfinished-today sections correct; edge tests pass. |
+
+9 milestones → 8; no dedicated history milestone since it's absorbed into #7.
 
 ---
 
-### Critical Files for Implementation
-- `chores/models.py` — `WeeklyAssignmentTemplate`/`ChoreInstance`/`TimeLog`/`Swap` and the effective-dating pattern that underpins history integrity
-- `chores/services.py` — instance generation (`ensure_instances_generated`) and `apply_assignment_change`, shared by direct-adult-edit and proposal-approval paths
-- `approvals/models.py` — the generic `Proposal` (ContentType-based) approval mechanism shared by chores and budgets
-- `people/middleware.py` — session-based active-person resolution that every other view depends on
-- `chores/notifications.py` — live "starting soon" / "unfinished today" computation logic
+### Critical files
+- `chores/models.py` — `WeeklyAssignmentTemplate`/`ChoreInstance`/`TimeLog` and the snapshot-at-generation pattern underpinning history integrity; `ProposedAssignmentChange`/`ProposedBudgetChange` and their `.approve()`/`.reject()`
+- `chores/services.py` — `ensure_instances_generated`, `swap_assignment`, `apply_assignment_change`, `apply_budget_change` — shared by direct-adult-edit and proposal-approval paths, and by the past-week guard
+- `people/models.py` — `Person`, including the two budget fields
+- `people/middleware.py` — session-based active-person resolution every other view depends on
+- `chores/notifications.py` — "starting soon" / "unfinished today" computation
