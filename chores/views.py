@@ -6,7 +6,7 @@ from people.models import Person
 
 from .dateutils import week_start_of
 from .models import ChoreInstance, TimeLog
-from .services import ensure_instances_generated, is_over_budget
+from .services import ensure_instances_generated, is_over_budget, swap_assignment
 
 
 def dashboard(request):
@@ -117,4 +117,35 @@ def log_time(request, instance_id):
         request,
         "chores/log_time.html",
         {"instance": instance, "error": error},
+    )
+
+
+def swap(request, instance_id):
+    """`GET/POST /chores/<instance_id>/swap/` — trade who's responsible.
+
+    GET renders a form listing active `Person` rows to swap the instance
+    to. POST calls `swap_assignment`; any `ValueError` it raises (past-dated
+    or already-done instance) is caught and shown as an error on the
+    re-rendered form, with no DB write. Any active person can perform a
+    swap on any instance — not restricted to adults or to the currently
+    assigned person.
+    """
+    instance = get_object_or_404(ChoreInstance, pk=instance_id)
+    error = None
+
+    if request.method == "POST":
+        new_person = get_object_or_404(Person, pk=request.POST.get("new_person"), is_active=True)
+        try:
+            swap_assignment(instance, new_person)
+        except ValueError as exc:
+            error = str(exc)
+        else:
+            return redirect("home")
+
+    people = Person.objects.filter(is_active=True).order_by("name")
+
+    return render(
+        request,
+        "chores/swap.html",
+        {"instance": instance, "people": people, "error": error},
     )
