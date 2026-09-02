@@ -90,6 +90,53 @@ def minutes_logged_this_week(person, week_start):
     return total or 0
 
 
+def apply_assignment_change(
+    target_template, chore, assigned_to, day_of_week, start_time, duration_minutes
+):
+    """Create or update a `WeeklyAssignmentTemplate` from typed args.
+
+    `target_template=None` means "new slot": a fresh `WeeklyAssignmentTemplate`
+    is created. Otherwise the given template's fields are overwritten and
+    saved in place. Returns the created/updated template.
+    """
+    if target_template is None:
+        return WeeklyAssignmentTemplate.objects.create(
+            chore=chore,
+            assigned_to=assigned_to,
+            day_of_week=day_of_week,
+            start_time=start_time,
+            duration_minutes=duration_minutes,
+        )
+
+    target_template.chore = chore
+    target_template.assigned_to = assigned_to
+    target_template.day_of_week = day_of_week
+    target_template.start_time = start_time
+    target_template.duration_minutes = duration_minutes
+    target_template.save()
+    return target_template
+
+
+def apply_budget_change(person, daily_budget_minutes=None, weekly_budget_minutes=None):
+    """Set only the non-`None` budget field(s) on `person`.
+
+    A `None` argument means "not changing this one" — it leaves the
+    existing value on `person` untouched, it does not clear it. Returns
+    `person`.
+    """
+    changed = False
+    if daily_budget_minutes is not None:
+        person.daily_budget_minutes = daily_budget_minutes
+        changed = True
+    if weekly_budget_minutes is not None:
+        person.weekly_budget_minutes = weekly_budget_minutes
+        changed = True
+
+    if changed:
+        person.save()
+    return person
+
+
 def is_over_budget(person, period, on_date):
     """Whether `person` has exceeded their `"daily"` or `"weekly"` budget.
 
