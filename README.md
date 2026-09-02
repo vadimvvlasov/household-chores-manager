@@ -18,6 +18,8 @@ See [`_docs/plan.md`](_docs/plan.md) for the full spec (users, features, out-of-
 ```bash
 uv sync
 uv run python manage.py migrate
+uv run python manage.py createsuperuser  # the shared family login
+uv run python manage.py seed_family      # creates 4 placeholder Person rows
 uv run python manage.py runserver
 ```
 
