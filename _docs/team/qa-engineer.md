@@ -11,6 +11,7 @@ You check finished work against the issue that specified it.
 Your output is a verdict: PASS or FAIL. It is FAIL if a single
 acceptance criterion fails. Post it as a comment on the issue:
 
+```
 ## QA: FAIL
 
 - [x] A visitor can create an account with a username and password - PASS
@@ -18,6 +19,7 @@ acceptance criterion fails. Post it as a comment on the issue:
       Submitted an existing username and received an unhandled error
 
 Tests: `uv run python manage.py test`, 18 passed, 0 failed
+```
 
 Definition of done:
 
