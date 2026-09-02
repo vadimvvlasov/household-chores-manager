@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import Chore, ChoreInstance, WeeklyAssignmentTemplate
+from .models import (
+    Chore,
+    ChoreInstance,
+    ProposedAssignmentChange,
+    ProposedBudgetChange,
+    WeeklyAssignmentTemplate,
+)
 
 
 @admin.register(Chore)
@@ -34,3 +40,29 @@ class ChoreInstanceAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(ProposedAssignmentChange)
+class ProposedAssignmentChangeAdmin(admin.ModelAdmin):
+    list_display = (
+        "chore",
+        "assigned_to",
+        "day_of_week",
+        "status",
+        "proposed_by",
+        "proposed_at",
+    )
+    list_filter = ("status",)
+
+
+@admin.register(ProposedBudgetChange)
+class ProposedBudgetChangeAdmin(admin.ModelAdmin):
+    list_display = (
+        "person",
+        "daily_budget_minutes",
+        "weekly_budget_minutes",
+        "status",
+        "proposed_by",
+        "proposed_at",
+    )
+    list_filter = ("status",)

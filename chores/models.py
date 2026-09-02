@@ -66,6 +66,136 @@ class ChoreInstance(models.Model):
         return f"{self.chore} - {self.assigned_person} on {self.date}"
 
 
+class ProposalStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    APPROVED = "APPROVED", "Approved"
+    REJECTED = "REJECTED", "Rejected"
+
+
+class ProposedAssignmentChange(models.Model):
+    """A kid's (or adult's, pre-approval) suggested create/edit of a
+    `WeeklyAssignmentTemplate`.
+
+    Holds the same plain typed fields as `WeeklyAssignmentTemplate` — not a
+    diff/JSON blob — so `chores.services.apply_assignment_change` can apply
+    them directly. `target_template=None` means "propose a brand new slot";
+    otherwise it names the existing template being edited.
+    """
+
+    target_template = models.ForeignKey(
+        WeeklyAssignmentTemplate,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="proposed_changes",
+    )
+    chore = models.ForeignKey(Chore, on_delete=models.PROTECT)
+    assigned_to = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="proposed_assignment_changes"
+    )
+    day_of_week = models.IntegerField(choices=WeeklyAssignmentTemplate.DayOfWeek.choices)
+    start_time = models.TimeField()
+    duration_minutes = models.PositiveSmallIntegerField()
+    proposed_by = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="assignment_changes_proposed"
+    )
+    proposed_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(
+        max_length=10, choices=ProposalStatus.choices, default=ProposalStatus.PENDING
+    )
+    reviewed_by = models.ForeignKey(
+        Person,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="assignment_changes_reviewed",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    def __str__(self):
+        return f"Proposed {self.chore} - {self.assigned_to} ({self.status})"
+
+    def approve(self, reviewed_by):
+        """Apply the proposed values to live data, then mark approved."""
+        from .services import apply_assignment_change
+
+        apply_assignment_change(
+            target_template=self.target_template,
+            chore=self.chore,
+            assigned_to=self.assigned_to,
+            day_of_week=self.day_of_week,
+            start_time=self.start_time,
+            duration_minutes=self.duration_minutes,
+        )
+        self.status = ProposalStatus.APPROVED
+        self.reviewed_by = reviewed_by
+        self.reviewed_at = timezone.now()
+        self.save()
+
+    def reject(self, reviewed_by, note=""):
+        """Mark rejected without touching live data."""
+        self.status = ProposalStatus.REJECTED
+        self.reviewed_by = reviewed_by
+        self.reviewed_at = timezone.now()
+        self.note = note
+        self.save()
+
+
+class ProposedBudgetChange(models.Model):
+    """A kid's (or adult's, pre-approval) suggested change to a `Person`'s
+    budget caps. Only the field(s) actually being changed carry a value —
+    the other stays `None`.
+    """
+
+    person = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="proposed_budget_changes"
+    )
+    daily_budget_minutes = models.PositiveIntegerField(null=True, blank=True)
+    weekly_budget_minutes = models.PositiveIntegerField(null=True, blank=True)
+    proposed_by = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="budget_changes_proposed"
+    )
+    proposed_at = models.DateTimeField(default=timezone.now)
+    status = models.CharField(
+        max_length=10, choices=ProposalStatus.choices, default=ProposalStatus.PENDING
+    )
+    reviewed_by = models.ForeignKey(
+        Person,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="budget_changes_reviewed",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    def __str__(self):
+        return f"Proposed budget change for {self.person} ({self.status})"
+
+    def approve(self, reviewed_by):
+        """Apply the proposed budget field(s) to live data, then mark approved."""
+        from .services import apply_budget_change
+
+        apply_budget_change(
+            person=self.person,
+            daily_budget_minutes=self.daily_budget_minutes,
+            weekly_budget_minutes=self.weekly_budget_minutes,
+        )
+        self.status = ProposalStatus.APPROVED
+        self.reviewed_by = reviewed_by
+        self.reviewed_at = timezone.now()
+        self.save()
+
+    def reject(self, reviewed_by, note=""):
+        """Mark rejected without touching live data."""
+        self.status = ProposalStatus.REJECTED
+        self.reviewed_by = reviewed_by
+        self.reviewed_at = timezone.now()
+        self.note = note
+        self.save()
+
+
 class TimeLog(models.Model):
     # CASCADE (unlike the PROTECT FKs above): a time log is dependent data
     # that only makes sense attached to its instance, so deleting the
