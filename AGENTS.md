@@ -13,5 +13,3 @@ Rules
 
 - Dependencies are added via `uv add` into `pyproject.toml`. Do not add one without
   asking.
-- Shortcut phrases (e.g. "Test issue #N") are defined in `_docs/process.md`. Check
-  there.

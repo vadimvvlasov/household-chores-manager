@@ -7,12 +7,6 @@ Roles
 - Engineer - implements one groomed task, follows _docs/team/software-engineer.md
 - QA - checks the result against the acceptance criteria, follows _docs/team/qa-engineer.md
 
-Shortcuts
-
-- "Test issue #N" - run QA on GitHub issue N per _docs/team/qa-engineer.md, post
-  PASS/FAIL verdict as issue comment.
-
-
 Orchestrator
 
 The main session is the orchestrator. It launches the PM, the engineer
