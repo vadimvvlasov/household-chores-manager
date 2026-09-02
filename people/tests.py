@@ -97,6 +97,35 @@ class LoginAndActivePersonTests(TestCase):
 
         self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
 
+    def test_login_success_redirects_to_profile_even_with_next_param(self):
+        # Reproduces the real browser flow: an anonymous request is bounced
+        # to "/login/?next=<path>" (per the redirect-to-login criterion),
+        # and the login form submission carries that "next" along. Success
+        # must still land on "/profile/", per the other criterion.
+        response = self.client.post(
+            f"{reverse('login')}?next=/",
+            {"username": "family", "password": "password"},
+        )
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
+    def test_login_success_after_bounce_from_select_person_does_not_405(self):
+        # A user bounced from POST /profile/select/ while unauthenticated
+        # gets redirected to "/login/?next=/profile/select/". Following
+        # that "next" after login would send a GET to the POST-only
+        # /profile/select/ endpoint, producing a 405. Login must ignore it.
+        bounce = self.client.post(reverse("select_person"), {"person_id": self.adult.id})
+        self.assertRedirects(
+            bounce, "/login/?next=/profile/select/", fetch_redirect_response=False
+        )
+
+        response = self.client.post(
+            "/login/?next=/profile/select/",
+            {"username": "family", "password": "password"},
+        )
+
+        self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
     def test_authenticated_with_no_active_person_redirects_to_profile(self):
         self.login()
 
