@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Today's Chores — Household Chores Manager</title>
+</head>
+<body>
+    <h1>Today's Chores — {{ today }}</h1>
+
+    <ul>
+        {% for instance in instances %}
+            <li>
+                <strong>{{ instance.chore.name }}</strong>
+                — {{ instance.assigned_person.name }}
+                — {{ instance.scheduled_start|time:"H:i" }}
+                — {% if instance.is_done %}Done{% else %}Not done{% endif %}
+
+                {% if instance.is_done %}
+                    <form method="post" action="{% url 'uncheck_instance' instance.id %}">
+                        {% csrf_token %}
+                        <button type="submit">Uncheck</button>
+                    </form>
+                {% else %}
+                    <form method="post" action="{% url 'check_instance' instance.id %}">
+                        {% csrf_token %}
+                        <button type="submit">Check off</button>
+                    </form>
+                {% endif %}
+
+                <a href="{% url 'log_time' instance.id %}">Log time</a>
+            </li>
+        {% empty %}
+            <li>No chores scheduled for today.</li>
+        {% endfor %}
+    </ul>
+
+    <form method="post" action="{% url 'logout' %}">
+        {% csrf_token %}
+        <button type="submit">Log out</button>
+    </form>
+</body>
+</html>
