@@ -1,3 +1,7 @@
+Documents
+
+- `_docs/process.md` - how work is organized
+
 Commands
 
 - `uv sync` - install dependencies
