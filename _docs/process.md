@@ -25,7 +25,9 @@ Lifecycle
 
 Rules
 
-- Do not skip step 2
+- Do not skip step 2 on a fresh issue. A step 5 retry does not re-run
+  it - acceptance criteria don't change on a FAIL, only the
+  implementation
 - The engineer does not close the issue
 - QA does not fix the code, only outputs PASS or FAIL
 - The orchestrator closes the issue only after QA outputs PASS
