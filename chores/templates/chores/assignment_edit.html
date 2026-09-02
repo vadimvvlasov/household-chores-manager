@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{% if template %}Edit assignment{% else %}New assignment{% endif %} — Household Chores Manager</title>
+</head>
+<body>
+    <h1>{% if template %}Edit assignment{% else %}New assignment{% endif %}</h1>
+
+    {% if error %}
+        <p>{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        {% csrf_token %}
+
+        <label for="chore">Chore</label>
+        <select id="chore" name="chore" required>
+            {% for chore in chores %}
+                <option value="{{ chore.id }}" {% if template.chore_id == chore.id %}selected{% endif %}>{{ chore.name }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="assigned_to">Assigned to</label>
+        <select id="assigned_to" name="assigned_to" required>
+            {% for person in people %}
+                <option value="{{ person.id }}" {% if template.assigned_to_id == person.id %}selected{% endif %}>{{ person.name }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="day_of_week">Day of week</label>
+        <select id="day_of_week" name="day_of_week" required>
+            {% for value, label in day_choices %}
+                <option value="{{ value }}" {% if template.day_of_week == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+
+        <label for="start_time">Start time</label>
+        <input type="time" id="start_time" name="start_time" value="{{ template.start_time|time:'H:i' }}" required>
+
+        <label for="duration_minutes">Duration (minutes)</label>
+        <input type="number" id="duration_minutes" name="duration_minutes" min="1" value="{{ template.duration_minutes|default_if_none:'' }}" required>
+
+        <button type="submit">Save</button>
+    </form>
+
+    <a href="{% url 'home' %}">Back to today's chores</a>
+</body>
+</html>

@@ -1,12 +1,29 @@
+import datetime
+
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from people.decorators import adult_required
 from people.models import Person
 
 from .dateutils import week_start_of
-from .models import ChoreInstance, TimeLog
-from .services import ensure_instances_generated, is_over_budget, swap_assignment
+from .models import (
+    Chore,
+    ChoreInstance,
+    ProposalStatus,
+    ProposedAssignmentChange,
+    ProposedBudgetChange,
+    TimeLog,
+    WeeklyAssignmentTemplate,
+)
+from .services import (
+    apply_assignment_change,
+    apply_budget_change,
+    ensure_instances_generated,
+    is_over_budget,
+    swap_assignment,
+)
 
 
 def dashboard(request):
@@ -149,3 +166,208 @@ def swap(request, instance_id):
         "chores/swap.html",
         {"instance": instance, "people": people, "error": error},
     )
+
+
+def assignment_edit(request, template_id=None):
+    """`GET/POST /assignments/new/` and `/assignments/<id>/edit/`.
+
+    `template_id=None` proposes/creates a brand new `WeeklyAssignmentTemplate`
+    slot; otherwise edits the named one. An adult's POST calls
+    `apply_assignment_change` immediately — no proposal row is created. A
+    kid's POST instead creates a `PENDING` `ProposedAssignmentChange` holding
+    the same typed values, and leaves the live template (if any) untouched.
+    """
+    template = None
+    if template_id is not None:
+        template = get_object_or_404(WeeklyAssignmentTemplate, pk=template_id)
+
+    error = None
+
+    if request.method == "POST":
+        chore = Chore.objects.filter(pk=request.POST.get("chore")).first()
+        assigned_to = Person.objects.filter(
+            pk=request.POST.get("assigned_to"), is_active=True
+        ).first()
+        raw_day = request.POST.get("day_of_week", "")
+        raw_start_time = request.POST.get("start_time", "")
+        raw_duration = request.POST.get("duration_minutes", "")
+
+        day_of_week = None
+        start_time = None
+        duration_minutes = None
+
+        if chore is None or assigned_to is None:
+            error = "Choose a chore and a person."
+
+        if error is None:
+            try:
+                day_of_week = int(raw_day)
+                if day_of_week not in WeeklyAssignmentTemplate.DayOfWeek.values:
+                    raise ValueError
+            except (TypeError, ValueError):
+                error = "Choose a valid day of the week."
+
+        if error is None:
+            try:
+                start_time = datetime.datetime.strptime(raw_start_time, "%H:%M").time()
+            except (TypeError, ValueError):
+                error = "Enter a valid start time."
+
+        if error is None:
+            try:
+                duration_minutes = int(raw_duration)
+                if duration_minutes <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                error = "Enter a whole number of minutes greater than zero."
+
+        if error is None:
+            if request.active_person.role == Person.Role.ADULT:
+                apply_assignment_change(
+                    target_template=template,
+                    chore=chore,
+                    assigned_to=assigned_to,
+                    day_of_week=day_of_week,
+                    start_time=start_time,
+                    duration_minutes=duration_minutes,
+                )
+            else:
+                ProposedAssignmentChange.objects.create(
+                    target_template=template,
+                    chore=chore,
+                    assigned_to=assigned_to,
+                    day_of_week=day_of_week,
+                    start_time=start_time,
+                    duration_minutes=duration_minutes,
+                    proposed_by=request.active_person,
+                )
+            return redirect("home")
+
+    chores = Chore.objects.filter(is_active=True).order_by("name")
+    people = Person.objects.filter(is_active=True).order_by("name")
+
+    return render(
+        request,
+        "chores/assignment_edit.html",
+        {
+            "template": template,
+            "chores": chores,
+            "people": people,
+            "day_choices": WeeklyAssignmentTemplate.DayOfWeek.choices,
+            "error": error,
+        },
+    )
+
+
+def budget_edit(request, person_id):
+    """`GET/POST /people/<person_id>/budget/`.
+
+    An adult's POST calls `apply_budget_change` immediately — no proposal
+    row is created. A kid's POST instead creates a `PENDING`
+    `ProposedBudgetChange`, and leaves the live budget untouched. A blank
+    field means "not changing that one" (see `apply_budget_change`).
+    """
+    person = get_object_or_404(Person, pk=person_id)
+    error = None
+
+    if request.method == "POST":
+        raw_daily = request.POST.get("daily_budget_minutes", "").strip()
+        raw_weekly = request.POST.get("weekly_budget_minutes", "").strip()
+
+        daily_budget_minutes = None
+        weekly_budget_minutes = None
+
+        try:
+            if raw_daily:
+                daily_budget_minutes = int(raw_daily)
+                if daily_budget_minutes < 0:
+                    raise ValueError
+            if raw_weekly:
+                weekly_budget_minutes = int(raw_weekly)
+                if weekly_budget_minutes < 0:
+                    raise ValueError
+        except (TypeError, ValueError):
+            error = "Enter whole, non-negative numbers of minutes."
+
+        if error is None:
+            if request.active_person.role == Person.Role.ADULT:
+                apply_budget_change(
+                    person,
+                    daily_budget_minutes=daily_budget_minutes,
+                    weekly_budget_minutes=weekly_budget_minutes,
+                )
+            else:
+                ProposedBudgetChange.objects.create(
+                    person=person,
+                    daily_budget_minutes=daily_budget_minutes,
+                    weekly_budget_minutes=weekly_budget_minutes,
+                    proposed_by=request.active_person,
+                )
+            return redirect("home")
+
+    return render(
+        request,
+        "chores/budget_edit.html",
+        {"person": person, "error": error},
+    )
+
+
+def approvals_list(request):
+    """`GET /approvals/` — every `PENDING` proposal from both models.
+
+    Visible to any active person; approve/reject buttons render for
+    everyone, but are only actionable by adults (enforced server-side by
+    `@adult_required` on the POST endpoints below).
+    """
+    assignment_changes = (
+        ProposedAssignmentChange.objects.filter(status=ProposalStatus.PENDING)
+        .select_related("chore", "assigned_to", "target_template", "proposed_by")
+        .order_by("proposed_at")
+    )
+    budget_changes = (
+        ProposedBudgetChange.objects.filter(status=ProposalStatus.PENDING)
+        .select_related("person", "proposed_by")
+        .order_by("proposed_at")
+    )
+
+    return render(
+        request,
+        "chores/approvals.html",
+        {"assignment_changes": assignment_changes, "budget_changes": budget_changes},
+    )
+
+
+@require_POST
+@adult_required
+def approve_assignment_change(request, pk):
+    """`POST /approvals/assignment/<id>/approve/` — adult-only."""
+    change = get_object_or_404(ProposedAssignmentChange, pk=pk, status=ProposalStatus.PENDING)
+    change.approve(request.active_person)
+    return redirect("approvals")
+
+
+@require_POST
+@adult_required
+def reject_assignment_change(request, pk):
+    """`POST /approvals/assignment/<id>/reject/` — adult-only."""
+    change = get_object_or_404(ProposedAssignmentChange, pk=pk, status=ProposalStatus.PENDING)
+    change.reject(request.active_person, note=request.POST.get("note", ""))
+    return redirect("approvals")
+
+
+@require_POST
+@adult_required
+def approve_budget_change(request, pk):
+    """`POST /approvals/budget/<id>/approve/` — adult-only."""
+    change = get_object_or_404(ProposedBudgetChange, pk=pk, status=ProposalStatus.PENDING)
+    change.approve(request.active_person)
+    return redirect("approvals")
+
+
+@require_POST
+@adult_required
+def reject_budget_change(request, pk):
+    """`POST /approvals/budget/<id>/reject/` — adult-only."""
+    change = get_object_or_404(ProposedBudgetChange, pk=pk, status=ProposalStatus.PENDING)
+    change.reject(request.active_person, note=request.POST.get("note", ""))
+    return redirect("approvals")
