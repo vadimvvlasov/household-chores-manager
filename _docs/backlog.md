@@ -1,5 +1,7 @@
 # Household Chores Manager — v1 Backlog
 
+Per `_docs/process.md`, tasks are tracked as GitHub issues — each task below is mirrored there, and issue open/closed state is canonical for progress. This file stays as the reference spec/description for each task (source of truth for *content*, not status).
+
 Each task independent, one-session sized. Based on `_docs/plan.md` spec + `_docs/architecture.md` (Django + uv, single shared login w/ session-based active-person picker, in-app notifications recomputed on page load, plain Django template forms with full-page POST/redirect/GET — no HTMX, no JS build, no Celery/cron/push).
 
 ## 1. Project scaffolding with a passing test
