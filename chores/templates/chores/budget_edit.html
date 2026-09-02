@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Edit budget — {{ person.name }} — Household Chores Manager</title>
+</head>
+<body>
+    <h1>Edit budget — {{ person.name }}</h1>
+    <p>
+        Current: daily {{ person.daily_budget_minutes|default_if_none:"no cap" }},
+        weekly {{ person.weekly_budget_minutes|default_if_none:"no cap" }}
+    </p>
+
+    {% if error %}
+        <p>{{ error }}</p>
+    {% endif %}
+
+    <form method="post">
+        {% csrf_token %}
+
+        <label for="daily_budget_minutes">Daily budget (minutes, leave blank to leave unchanged)</label>
+        <input type="number" id="daily_budget_minutes" name="daily_budget_minutes" min="0">
+
+        <label for="weekly_budget_minutes">Weekly budget (minutes, leave blank to leave unchanged)</label>
+        <input type="number" id="weekly_budget_minutes" name="weekly_budget_minutes" min="0">
+
+        <button type="submit">Save</button>
+    </form>
+
+    <a href="{% url 'home' %}">Back to today's chores</a>
+</body>
+</html>
