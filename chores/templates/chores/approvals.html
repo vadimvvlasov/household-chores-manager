@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Approvals — Household Chores Manager</title>
+</head>
+<body>
+    <h1>Pending approvals</h1>
+
+    <h2>Assignment changes</h2>
+    <ul>
+        {% for change in assignment_changes %}
+            <li>
+                {{ change.chore.name }} — {{ change.assigned_to.name }}
+                — {{ change.get_day_of_week_display }} {{ change.start_time|time:"H:i" }}
+                ({{ change.duration_minutes }} min)
+                — proposed by {{ change.proposed_by.name }}
+                {% if change.target_template %}(editing existing slot){% else %}(new slot){% endif %}
+
+                <form method="post" action="{% url 'approve_assignment_change' change.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Approve</button>
+                </form>
+                <form method="post" action="{% url 'reject_assignment_change' change.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Reject</button>
+                </form>
+            </li>
+        {% empty %}
+            <li>No pending assignment changes.</li>
+        {% endfor %}
+    </ul>
+
+    <h2>Budget changes</h2>
+    <ul>
+        {% for change in budget_changes %}
+            <li>
+                {{ change.person.name }}
+                — daily: {{ change.daily_budget_minutes|default_if_none:"unchanged" }}
+                — weekly: {{ change.weekly_budget_minutes|default_if_none:"unchanged" }}
+                — proposed by {{ change.proposed_by.name }}
+
+                <form method="post" action="{% url 'approve_budget_change' change.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Approve</button>
+                </form>
+                <form method="post" action="{% url 'reject_budget_change' change.id %}" style="display:inline">
+                    {% csrf_token %}
+                    <button type="submit">Reject</button>
+                </form>
+            </li>
+        {% empty %}
+            <li>No pending budget changes.</li>
+        {% endfor %}
+    </ul>
+
+    <a href="{% url 'home' %}">Back to today's chores</a>
+</body>
+</html>
