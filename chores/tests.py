@@ -15,6 +15,7 @@ from .services import (
     is_over_budget,
     minutes_logged_this_week,
     minutes_logged_today,
+    swap_assignment,
 )
 
 
@@ -353,6 +354,92 @@ class ChoreInstanceModelTests(TestCase):
             self.person.delete()
 
 
+class SwapAssignmentServiceTests(TestCase):
+    def setUp(self):
+        self.chore = Chore.objects.create(name="Dishes")
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.other_person = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+    def _make_instance(self, date, **extra):
+        defaults = {
+            "template": self.template,
+            "chore": self.chore,
+            "date": date,
+            "scheduled_start": timezone.make_aware(
+                datetime.datetime.combine(date, datetime.time(9, 0))
+            ),
+            "budgeted_minutes": 10,
+            "assigned_person": self.person,
+        }
+        defaults.update(extra)
+        return ChoreInstance.objects.create(**defaults)
+
+    def test_swap_on_future_undone_instance_succeeds(self):
+        instance = self._make_instance(timezone.localdate() + datetime.timedelta(days=1))
+
+        swap_assignment(instance, self.other_person)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.other_person)
+
+    def test_swap_on_todays_undone_instance_succeeds(self):
+        instance = self._make_instance(timezone.localdate())
+
+        swap_assignment(instance, self.other_person)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.other_person)
+
+    def test_swap_on_past_instance_raises_and_makes_no_change(self):
+        instance = self._make_instance(timezone.localdate() - datetime.timedelta(days=1))
+
+        with self.assertRaises(ValueError):
+            swap_assignment(instance, self.other_person)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.person)
+
+    def test_swap_on_done_instance_raises_and_makes_no_change(self):
+        instance = self._make_instance(
+            timezone.localdate(),
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.person,
+        )
+
+        with self.assertRaises(ValueError):
+            swap_assignment(instance, self.other_person)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.person)
+
+    def test_swap_does_not_alter_time_logs_or_done_by(self):
+        instance = self._make_instance(
+            timezone.localdate() + datetime.timedelta(days=1)
+        )
+        log = TimeLog.objects.create(
+            chore_instance=instance,
+            logged_by=self.person,
+            minutes=15,
+            logged_at=timezone.now(),
+        )
+
+        swap_assignment(instance, self.other_person)
+
+        log.refresh_from_db()
+        self.assertEqual(log.logged_by, self.person)
+        instance.refresh_from_db()
+        self.assertIsNone(instance.done_by)
+        self.assertIsNone(instance.done_at)
+
+
 class ChoreInstanceAdminTests(TestCase):
     def setUp(self):
         self.superuser = User.objects.create_superuser(
@@ -508,6 +595,13 @@ class DashboardViewTests(ChoreInstanceViewTestBase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(ChoreInstance.objects.filter(template=self.template).exists())
 
+    def test_shows_working_swap_link_for_todays_instance(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.get("/")
+
+        self.assertContains(response, reverse("swap", args=[instance.id]))
+
 
 class CheckInstanceViewTests(ChoreInstanceViewTestBase):
     def test_check_marks_done_with_active_person_and_redirects_home(self):
@@ -637,6 +731,108 @@ class LogTimeViewTests(ChoreInstanceViewTestBase):
         response = self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "not-a-number"})
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
+
+
+class SwapViewTests(ChoreInstanceViewTestBase):
+    def test_get_renders_form_listing_active_people(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.get(reverse("swap", args=[instance.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Alex")
+        self.assertContains(response, "Sam")
+
+    def test_get_does_not_list_inactive_people(self):
+        inactive = Person.objects.create(
+            name="Riley", role=Person.Role.ADULT, is_active=False
+        )
+        instance = self._make_instance(self.today)
+
+        response = self.client.get(reverse("swap", args=[instance.id]))
+
+        self.assertNotContains(response, "Riley")
+        self.assertEqual(inactive.is_active, False)
+
+    def test_post_swaps_assignment_and_redirects_home(self):
+        instance = self._make_instance(self.today, assigned_person=self.active_person)
+
+        response = self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.other_person)
+
+    def test_post_future_instance_succeeds(self):
+        instance = self._make_instance(
+            self.today + datetime.timedelta(days=1), assigned_person=self.active_person
+        )
+
+        response = self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.other_person)
+
+    def test_post_against_past_instance_is_rejected_with_error_and_no_change(self):
+        instance = self._make_instance(
+            self.today - datetime.timedelta(days=1), assigned_person=self.active_person
+        )
+
+        response = self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "past")
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.active_person)
+
+    def test_post_against_done_instance_is_rejected_with_error_and_no_change(self):
+        instance = self._make_instance(
+            self.today,
+            assigned_person=self.active_person,
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.active_person,
+        )
+
+        response = self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "done")
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.active_person)
+
+    def test_any_active_person_can_swap_not_restricted_to_assigned_person(self):
+        # active_person (the logged-in session's active person) is not the
+        # instance's assigned_person, and is a KID role, yet the swap still
+        # succeeds — swaps aren't restricted to adults or the current
+        # assignee.
+        instance = self._make_instance(self.today, assigned_person=self.other_person)
+
+        response = self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.active_person.id}
+        )
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
+        instance.refresh_from_db()
+        self.assertEqual(instance.assigned_person, self.active_person)
+
+    def test_swap_does_not_create_a_time_log(self):
+        instance = self._make_instance(self.today)
+
+        self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
         self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
 
 
