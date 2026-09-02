@@ -34,6 +34,20 @@
         {% endfor %}
     </ul>
 
+    <h2>People</h2>
+    <ul>
+        {% for entry in people %}
+            <li>
+                {{ entry.person.name }}
+                {% if entry.over_budget %}
+                    <span class="budget-warning">⚠ Over budget</span>
+                {% endif %}
+            </li>
+        {% empty %}
+            <li>No active people.</li>
+        {% endfor %}
+    </ul>
+
     <form method="post" action="{% url 'logout' %}">
         {% csrf_token %}
         <button type="submit">Log out</button>

@@ -2,9 +2,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
+from people.models import Person
+
 from .dateutils import week_start_of
 from .models import ChoreInstance, TimeLog
-from .services import ensure_instances_generated
+from .services import ensure_instances_generated, is_over_budget
 
 
 def dashboard(request):
@@ -14,9 +16,15 @@ def dashboard(request):
     `ChoreInstance` scheduled for today, for every person, not just the
     active one — per project scope, everyone can see everyone else's
     status.
+
+    Also lists every active `Person` once (in addition to the per-instance
+    list above) with an over-budget warning flag, since a person may appear
+    zero or several times in the instance list depending on how many chores
+    they have today.
     """
     today = timezone.localdate()
-    ensure_instances_generated(week_start_of(today))
+    week_start = week_start_of(today)
+    ensure_instances_generated(week_start)
 
     instances = (
         ChoreInstance.objects.filter(date=today)
@@ -24,7 +32,18 @@ def dashboard(request):
         .order_by("scheduled_start")
     )
 
-    return render(request, "chores/dashboard.html", {"instances": instances, "today": today})
+    people = []
+    for person in Person.objects.filter(is_active=True).order_by("name"):
+        over_budget = is_over_budget(person, "daily", today) or is_over_budget(
+            person, "weekly", week_start
+        )
+        people.append({"person": person, "over_budget": over_budget})
+
+    return render(
+        request,
+        "chores/dashboard.html",
+        {"instances": instances, "today": today, "people": people},
+    )
 
 
 @require_POST

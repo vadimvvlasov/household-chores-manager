@@ -1,8 +1,10 @@
 import datetime
 
+from django.db.models import Sum
 from django.utils import timezone
 
-from .models import ChoreInstance, WeeklyAssignmentTemplate
+from .dateutils import week_start_of
+from .models import ChoreInstance, TimeLog, WeeklyAssignmentTemplate
 
 
 def ensure_instances_generated(week_start):
@@ -41,3 +43,50 @@ def ensure_instances_generated(week_start):
             created_instances.append(instance)
 
     return created_instances
+
+
+def minutes_logged_today(person, on_date):
+    """Total `TimeLog.minutes` for `person` logged on `on_date`.
+
+    Scoped by the local date `logged_at` falls on, not by the chore
+    instance's scheduled date — a swap can move `assigned_person` after the
+    fact, so this reflects who actually did the work.
+    """
+    total = TimeLog.objects.filter(logged_by=person, logged_at__date=on_date).aggregate(
+        total=Sum("minutes")
+    )["total"]
+    return total or 0
+
+
+def minutes_logged_this_week(person, week_start):
+    """Total `TimeLog.minutes` for `person` in the Sunday-Saturday week containing `week_start`."""
+    start_of_week = week_start_of(week_start)
+    end_of_week = start_of_week + datetime.timedelta(days=6)
+
+    total = TimeLog.objects.filter(
+        logged_by=person,
+        logged_at__date__gte=start_of_week,
+        logged_at__date__lte=end_of_week,
+    ).aggregate(total=Sum("minutes"))["total"]
+    return total or 0
+
+
+def is_over_budget(person, period, on_date):
+    """Whether `person` has exceeded their `"daily"` or `"weekly"` budget.
+
+    `False` whenever the relevant budget field is `None` (no cap set).
+    Otherwise `True` only when logged minutes strictly exceed the budget —
+    exactly at the limit is not over.
+    """
+    if period == "daily":
+        budget = person.daily_budget_minutes
+        if budget is None:
+            return False
+        return minutes_logged_today(person, on_date) > budget
+    elif period == "weekly":
+        budget = person.weekly_budget_minutes
+        if budget is None:
+            return False
+        return minutes_logged_this_week(person, on_date) > budget
+    else:
+        raise ValueError(f"Unknown period: {period!r}")
