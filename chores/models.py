@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 from people.models import Person
 
@@ -63,3 +64,19 @@ class ChoreInstance(models.Model):
 
     def __str__(self):
         return f"{self.chore} - {self.assigned_person} on {self.date}"
+
+
+class TimeLog(models.Model):
+    # CASCADE (unlike the PROTECT FKs above): a time log is dependent data
+    # that only makes sense attached to its instance, so deleting the
+    # instance should remove its logs rather than being blocked by them.
+    chore_instance = models.ForeignKey(
+        ChoreInstance, on_delete=models.CASCADE, related_name="time_logs"
+    )
+    logged_by = models.ForeignKey(Person, on_delete=models.PROTECT)
+    minutes = models.PositiveIntegerField()
+    logged_at = models.DateTimeField(default=timezone.now)
+    note = models.CharField(max_length=255, blank=True)
+
+    def __str__(self):
+        return f"{self.minutes}min on {self.chore_instance} by {self.logged_by}"
