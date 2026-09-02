@@ -42,6 +42,43 @@ class PersonAdminTests(TestCase):
         self.assertContains(response, "Jamie")
         self.assertContains(response, "Kid")
 
+    def test_budget_fields_are_editable_in_admin(self):
+        person = Person.objects.create(name="Jamie", role=Person.Role.KID)
+
+        response = self.client.post(
+            reverse("admin:people_person_change", args=[person.pk]),
+            {
+                "name": "Jamie",
+                "role": Person.Role.KID,
+                "is_active": "on",
+                "daily_budget_minutes": "45",
+                "weekly_budget_minutes": "200",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        person.refresh_from_db()
+        self.assertEqual(person.daily_budget_minutes, 45)
+        self.assertEqual(person.weekly_budget_minutes, 200)
+
+    def test_budget_fields_can_be_cleared_back_to_none_in_admin(self):
+        person = Person.objects.create(
+            name="Jamie",
+            role=Person.Role.KID,
+            daily_budget_minutes=45,
+            weekly_budget_minutes=200,
+        )
+
+        response = self.client.post(
+            reverse("admin:people_person_change", args=[person.pk]),
+            {"name": "Jamie", "role": Person.Role.KID, "is_active": "on"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        person.refresh_from_db()
+        self.assertIsNone(person.daily_budget_minutes)
+        self.assertIsNone(person.weekly_budget_minutes)
+
 
 class PersonModelTests(TestCase):
     def test_person_fields_persist(self):
@@ -61,6 +98,27 @@ class PersonModelTests(TestCase):
         person.save()
 
         self.assertTrue(Person.objects.filter(pk=person.pk, is_active=False).exists())
+
+    def test_budget_fields_default_to_none(self):
+        person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+
+        person.refresh_from_db()
+
+        self.assertIsNone(person.daily_budget_minutes)
+        self.assertIsNone(person.weekly_budget_minutes)
+
+    def test_budget_fields_can_be_set(self):
+        person = Person.objects.create(
+            name="Alex",
+            role=Person.Role.ADULT,
+            daily_budget_minutes=30,
+            weekly_budget_minutes=150,
+        )
+
+        person.refresh_from_db()
+
+        self.assertEqual(person.daily_budget_minutes, 30)
+        self.assertEqual(person.weekly_budget_minutes, 150)
 
 
 class LoginAndActivePersonTests(TestCase):

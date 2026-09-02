@@ -10,7 +10,12 @@ from people.models import Person
 
 from .dateutils import week_start_of
 from .models import Chore, ChoreInstance, TimeLog, WeeklyAssignmentTemplate
-from .services import ensure_instances_generated
+from .services import (
+    ensure_instances_generated,
+    is_over_budget,
+    minutes_logged_this_week,
+    minutes_logged_today,
+)
 
 
 class ChoreModelTests(TestCase):
@@ -633,3 +638,253 @@ class LogTimeViewTests(ChoreInstanceViewTestBase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
+
+
+class MinutesLoggedTodayTests(TestCase):
+    def setUp(self):
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.chore = Chore.objects.create(name="Dishes")
+        self.other_chore = Chore.objects.create(name="Vacuum")
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        self.other_template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.other_chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.MONDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+
+    def _make_instance(self, template, chore, date):
+        return ChoreInstance.objects.create(
+            template=template,
+            chore=chore,
+            date=date,
+            scheduled_start=timezone.make_aware(datetime.datetime.combine(date, datetime.time(9, 0))),
+            budgeted_minutes=10,
+            assigned_person=self.person,
+        )
+
+    def test_sums_two_logs_on_different_chore_instances_same_day(self):
+        day = datetime.date(2026, 9, 1)
+        instance1 = self._make_instance(self.template, self.chore, day)
+        instance2 = self._make_instance(self.other_template, self.other_chore, day)
+        TimeLog.objects.create(
+            chore_instance=instance1,
+            logged_by=self.person,
+            minutes=20,
+            logged_at=timezone.make_aware(datetime.datetime.combine(day, datetime.time(8, 0))),
+        )
+        TimeLog.objects.create(
+            chore_instance=instance2,
+            logged_by=self.person,
+            minutes=15,
+            logged_at=timezone.make_aware(datetime.datetime.combine(day, datetime.time(14, 0))),
+        )
+
+        self.assertEqual(minutes_logged_today(self.person, day), 35)
+
+    def test_scoped_by_logged_at_date_not_instance_scheduled_date(self):
+        # A swap can move assigned_person after the fact, so this must
+        # reflect when the time was actually logged, not the instance's
+        # scheduled date.
+        instance = self._make_instance(self.template, self.chore, datetime.date(2026, 9, 1))
+        logged_day = datetime.date(2026, 9, 5)
+        TimeLog.objects.create(
+            chore_instance=instance,
+            logged_by=self.person,
+            minutes=30,
+            logged_at=timezone.make_aware(datetime.datetime.combine(logged_day, datetime.time(10, 0))),
+        )
+
+        self.assertEqual(minutes_logged_today(self.person, logged_day), 30)
+        self.assertEqual(minutes_logged_today(self.person, instance.date), 0)
+
+    def test_no_logs_returns_zero(self):
+        self.assertEqual(minutes_logged_today(self.person, datetime.date(2026, 9, 1)), 0)
+
+
+class MinutesLoggedThisWeekTests(TestCase):
+    def setUp(self):
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.chore = Chore.objects.create(name="Dishes")
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        self.instance = ChoreInstance.objects.create(
+            template=self.template,
+            chore=self.chore,
+            date=datetime.date(2026, 8, 30),
+            scheduled_start=timezone.make_aware(datetime.datetime(2026, 8, 30, 9, 0)),
+            budgeted_minutes=10,
+            assigned_person=self.person,
+        )
+
+    def _log(self, minutes, logged_at):
+        return TimeLog.objects.create(
+            chore_instance=self.instance,
+            logged_by=self.person,
+            minutes=minutes,
+            logged_at=logged_at,
+        )
+
+    def test_sums_within_the_sunday_saturday_week(self):
+        self._log(10, timezone.make_aware(datetime.datetime(2026, 8, 30, 1, 0)))
+        self._log(5, timezone.make_aware(datetime.datetime(2026, 9, 5, 23, 0)))
+
+        self.assertEqual(minutes_logged_this_week(self.person, datetime.date(2026, 9, 2)), 15)
+
+    def test_derives_week_start_via_week_start_of_rather_than_requiring_a_sunday(self):
+        self._log(10, timezone.make_aware(datetime.datetime(2026, 8, 30, 1, 0)))
+
+        # Passing a mid-week date should still land in the Aug 30 - Sep 5 week.
+        self.assertEqual(minutes_logged_this_week(self.person, datetime.date(2026, 9, 2)), 10)
+        self.assertEqual(
+            minutes_logged_this_week(self.person, datetime.date(2026, 9, 2)),
+            minutes_logged_this_week(self.person, week_start_of(datetime.date(2026, 9, 2))),
+        )
+
+    def test_log_just_before_and_after_sunday_boundary_count_toward_correct_week_only(self):
+        # Saturday 23:59:59 belongs to the prior week (Aug 23 - Aug 29).
+        self._log(20, timezone.make_aware(datetime.datetime(2026, 8, 29, 23, 59, 59)))
+        # Sunday 00:00:00 belongs to the new week (Aug 30 - Sep 5).
+        self._log(30, timezone.make_aware(datetime.datetime(2026, 8, 30, 0, 0, 0)))
+
+        self.assertEqual(minutes_logged_this_week(self.person, datetime.date(2026, 8, 29)), 20)
+        self.assertEqual(minutes_logged_this_week(self.person, datetime.date(2026, 8, 30)), 30)
+
+    def test_no_logs_returns_zero(self):
+        self.assertEqual(minutes_logged_this_week(self.person, datetime.date(2026, 8, 30)), 0)
+
+
+class IsOverBudgetTests(TestCase):
+    def setUp(self):
+        self.person = Person.objects.create(
+            name="Alex",
+            role=Person.Role.ADULT,
+            daily_budget_minutes=30,
+            weekly_budget_minutes=120,
+        )
+        self.chore = Chore.objects.create(name="Dishes")
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        self.day = datetime.date(2026, 8, 30)  # a Sunday
+        self.instance = ChoreInstance.objects.create(
+            template=self.template,
+            chore=self.chore,
+            date=self.day,
+            scheduled_start=timezone.make_aware(datetime.datetime.combine(self.day, datetime.time(9, 0))),
+            budgeted_minutes=10,
+            assigned_person=self.person,
+        )
+
+    def _log(self, minutes):
+        TimeLog.objects.create(
+            chore_instance=self.instance,
+            logged_by=self.person,
+            minutes=minutes,
+            logged_at=timezone.make_aware(datetime.datetime.combine(self.day, datetime.time(10, 0))),
+        )
+
+    def test_daily_exactly_at_limit_is_not_over(self):
+        self._log(30)
+
+        self.assertFalse(is_over_budget(self.person, "daily", self.day))
+
+    def test_daily_one_minute_over_warns(self):
+        self._log(31)
+
+        self.assertTrue(is_over_budget(self.person, "daily", self.day))
+
+    def test_daily_none_budget_never_warns(self):
+        self.person.daily_budget_minutes = None
+        self.person.save()
+        self._log(10_000)
+
+        self.assertFalse(is_over_budget(self.person, "daily", self.day))
+
+    def test_weekly_exactly_at_limit_is_not_over(self):
+        self._log(120)
+
+        self.assertFalse(is_over_budget(self.person, "weekly", week_start_of(self.day)))
+
+    def test_weekly_one_minute_over_warns(self):
+        self._log(121)
+
+        self.assertTrue(is_over_budget(self.person, "weekly", week_start_of(self.day)))
+
+    def test_weekly_none_budget_never_warns(self):
+        self.person.weekly_budget_minutes = None
+        self.person.save()
+        self._log(10_000)
+
+        self.assertFalse(is_over_budget(self.person, "weekly", week_start_of(self.day)))
+
+
+class DashboardBudgetWarningTests(ChoreInstanceViewTestBase):
+    def test_people_section_lists_active_person_with_no_instance_today(self):
+        response = self.client.get("/")
+
+        self.assertContains(response, "Sam")  # other_person has no chore instance today
+
+    def test_over_budget_person_shows_warning_badge(self):
+        self.active_person.daily_budget_minutes = 10
+        self.active_person.save()
+        instance = self._make_instance(self.today)
+        TimeLog.objects.create(
+            chore_instance=instance, logged_by=self.active_person, minutes=15, logged_at=timezone.now()
+        )
+
+        response = self.client.get("/")
+
+        self.assertContains(response, "Over budget")
+
+    def test_person_under_budget_does_not_show_warning(self):
+        self.active_person.daily_budget_minutes = 100
+        self.active_person.save()
+        instance = self._make_instance(self.today)
+        TimeLog.objects.create(
+            chore_instance=instance, logged_by=self.active_person, minutes=15, logged_at=timezone.now()
+        )
+
+        response = self.client.get("/")
+
+        self.assertNotContains(response, "Over budget")
+
+    def test_inactive_person_is_not_listed_in_people_section(self):
+        self.other_person.is_active = False
+        self.other_person.save()
+
+        response = self.client.get("/")
+
+        self.assertNotContains(response, "Sam")
+
+
+class BudgetDoesNotBlockActionsTests(ChoreInstanceViewTestBase):
+    def test_logging_time_past_budget_then_check_off_still_succeeds(self):
+        self.active_person.daily_budget_minutes = 10
+        self.active_person.save()
+        instance = self._make_instance(self.today)
+
+        log_response = self.client.post(reverse("log_time", args=[instance.id]), {"minutes": "50"})
+        self.assertRedirects(log_response, "/", fetch_redirect_response=False)
+
+        check_response = self.client.post(reverse("check_instance", args=[instance.id]))
+        self.assertRedirects(check_response, "/", fetch_redirect_response=False)
+
+        instance.refresh_from_db()
+        self.assertTrue(instance.is_done)
