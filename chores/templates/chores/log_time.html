@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Log time — {{ instance.chore.name }} — Household Chores Manager</title>
+</head>
+<body>
+    <h1>Log time — {{ instance.chore.name }}</h1>
+    <p>{{ instance.assigned_person.name }} — {{ instance.date }} {{ instance.scheduled_start|time:"H:i" }}</p>
+
+    {% if error %}
+        <p>{{ error }}</p>
+    {% endif %}
+
+    <form method="post" action="{% url 'log_time' instance.id %}">
+        {% csrf_token %}
+        <label for="minutes">Minutes</label>
+        <input type="number" id="minutes" name="minutes" min="1" required>
+
+        <label for="note">Note (optional)</label>
+        <input type="text" id="note" name="note">
+
+        <button type="submit">Save</button>
+    </form>
+
+    <a href="{% url 'home' %}">Back to today's chores</a>
+</body>
+</html>
