@@ -1,10 +1,12 @@
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.http import HttpResponse
 from django.test import TestCase
 from django.urls import reverse
 
 from .decorators import adult_required
 from .models import Person
+from .seed import seed_default_family
 
 
 class PersonAdminTests(TestCase):
@@ -243,6 +245,55 @@ class LoginAndActivePersonTests(TestCase):
         response = self.client.get("/")
 
         self.assertRedirects(response, "/profile/", fetch_redirect_response=False)
+
+
+class SeedDefaultFamilyTests(TestCase):
+    def test_seeds_4_people_with_expected_names_and_roles(self):
+        seed_default_family()
+
+        self.assertEqual(Person.objects.count(), 4)
+        self.assertEqual(
+            Person.objects.get(name="Adult 1").role, Person.Role.ADULT
+        )
+        self.assertEqual(
+            Person.objects.get(name="Adult 2").role, Person.Role.ADULT
+        )
+        self.assertEqual(Person.objects.get(name="Kid 1").role, Person.Role.KID)
+        self.assertEqual(Person.objects.get(name="Kid 2").role, Person.Role.KID)
+
+    def test_running_twice_does_not_duplicate_rows(self):
+        seed_default_family()
+        seed_default_family()
+
+        self.assertEqual(Person.objects.count(), 4)
+
+    def test_running_against_empty_db_leaves_exactly_4(self):
+        self.assertEqual(Person.objects.count(), 0)
+
+        seed_default_family()
+
+        self.assertEqual(Person.objects.count(), 4)
+
+    def test_existing_row_with_matching_name_is_left_unmodified(self):
+        Person.objects.create(name="Adult 1", role=Person.Role.KID, is_active=False)
+
+        seed_default_family()
+
+        person = Person.objects.get(name="Adult 1")
+        self.assertEqual(person.role, Person.Role.KID)
+        self.assertFalse(person.is_active)
+        self.assertEqual(Person.objects.count(), 4)
+
+    def test_management_command_seeds_default_family(self):
+        call_command("seed_family")
+
+        self.assertEqual(Person.objects.count(), 4)
+
+    def test_management_command_is_idempotent(self):
+        call_command("seed_family")
+        call_command("seed_family")
+
+        self.assertEqual(Person.objects.count(), 4)
 
 
 class AdultRequiredDecoratorTests(TestCase):
