@@ -230,7 +230,7 @@ def swap(request, instance_id):
     if request.method == "POST":
         new_person = get_object_or_404(Person, pk=request.POST.get("new_person"), is_active=True)
         try:
-            swap_assignment(instance, new_person)
+            swap_assignment(instance, new_person, swapped_by=request.active_person)
         except ValueError as exc:
             error = str(exc)
         else:

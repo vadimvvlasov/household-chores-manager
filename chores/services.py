@@ -4,7 +4,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from .dateutils import week_start_of
-from .models import ChoreInstance, TimeLog, WeeklyAssignmentTemplate
+from .models import ChoreInstance, SwapLog, TimeLog, WeeklyAssignmentTemplate
 
 
 def ensure_instances_generated(week_start):
@@ -45,20 +45,34 @@ def ensure_instances_generated(week_start):
     return created_instances
 
 
-def swap_assignment(instance, new_person):
+def swap_assignment(instance, new_person, swapped_by):
     """Reassign `instance.assigned_person` to `new_person`, effective immediately.
 
     Any two active family members can swap who's responsible for a specific
     day's chore, with no approval step. Raises `ValueError` (making no DB
-    write) when the instance is in the past or already done — a swap only
-    changes who's responsible going forward, so it can't apply to a chore
-    whose day has already passed or that's already been completed. Existing
-    `TimeLog` rows and any already-set `done_by`/`done_at` are left alone.
+    write at all — no `SwapLog` row and no `ChoreInstance` change) when the
+    instance is in the past or already done — a swap only changes who's
+    responsible going forward, so it can't apply to a chore whose day has
+    already passed or that's already been completed. Existing `TimeLog` rows
+    and any already-set `done_by`/`done_at` are left alone.
+
+    On success, records a `SwapLog` row (who it was from, who it's going to,
+    and who performed the swap) alongside reassigning `instance`.
     """
     if instance.date < timezone.localdate():
         raise ValueError("Can't swap a chore from a past date.")
     if instance.is_done:
         raise ValueError("Can't swap a chore that's already done.")
+
+    from_person = instance.assigned_person
+
+    SwapLog.objects.create(
+        chore_instance=instance,
+        from_person=from_person,
+        to_person=new_person,
+        swapped_by=swapped_by,
+        swapped_at=timezone.now(),
+    )
 
     instance.assigned_person = new_person
     instance.save()

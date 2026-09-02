@@ -196,6 +196,26 @@ class ProposedBudgetChange(models.Model):
         self.save()
 
 
+class SwapLog(models.Model):
+    # CASCADE (same reasoning as TimeLog): a swap log is dependent data that
+    # only makes sense attached to its instance, so deleting the instance
+    # should remove its swap history rather than being blocked by it.
+    chore_instance = models.ForeignKey(
+        ChoreInstance, on_delete=models.CASCADE, related_name="swap_logs"
+    )
+    from_person = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="swaps_from"
+    )
+    to_person = models.ForeignKey(Person, on_delete=models.PROTECT, related_name="swaps_to")
+    swapped_by = models.ForeignKey(
+        Person, on_delete=models.PROTECT, related_name="swaps_performed"
+    )
+    swapped_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.chore_instance} swapped from {self.from_person} to {self.to_person}"
+
+
 class TimeLog(models.Model):
     # CASCADE (unlike the PROTECT FKs above): a time log is dependent data
     # that only makes sense attached to its instance, so deleting the
