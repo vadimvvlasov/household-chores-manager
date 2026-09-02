@@ -23,6 +23,27 @@ uv run python manage.py seed_family      # creates 4 placeholder Person rows
 uv run python manage.py runserver
 ```
 
+## Usage
+
+### `/admin/` guide
+
+Chores, assignments, and people have no in-app create/edit UI yet — use Django admin (log in with the superuser from setup):
+
+| Section | Model | What it's for |
+|---|---|---|
+| People | Person | Rename the 4 seeded placeholders, set role, set daily/weekly budget minutes |
+| Chores | Chore | Define a chore (name, description, default duration) |
+| Chores | Weekly assignment template | Fix a chore to a person + day-of-week + time — this is the recurring weekly plan |
+| Chores | Chore instance, Swap log | Read-only, system-generated — for debugging/history, don't edit by hand |
+
+Everything else (check-off, time-log, swap, propose/approve changes) has its own page, reached from the dashboard.
+
+### Day to day
+
+1. Log in at `/login/`, pick your profile at `/profile/`
+2. Dashboard (`/`) — today's chores; that week's instances generate automatically on page load, no separate step
+3. Calendar (`/calendar/?week=YYYY-MM-DD`) — any week, past weeks are read-only
+
 ## Tests
 
 ```bash
