@@ -1625,3 +1625,127 @@ class ApproveRejectBudgetChangeViewTests(ProposalViewTestBase):
         self.assertEqual(response.status_code, 403)
         self.proposal.refresh_from_db()
         self.assertEqual(self.proposal.status, ProposalStatus.PENDING)
+
+
+class CalendarViewTests(ChoreInstanceViewTestBase):
+    """`GET /calendar/?week=YYYY-MM-DD` — see issue #10."""
+
+    def test_route_is_mounted_at_calendar_not_under_chores(self):
+        self.assertEqual(reverse("calendar"), "/calendar/")
+
+    def test_dashboard_links_to_calendar(self):
+        response = self.client.get("/")
+
+        self.assertContains(response, 'href="/calendar/"')
+
+    def test_missing_week_param_defaults_to_current_week(self):
+        response = self.client.get(reverse("calendar"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(week_start_of(self.today)))
+
+    def test_unparsable_week_param_defaults_to_current_week(self):
+        response = self.client.get(reverse("calendar"), {"week": "not-a-date"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(week_start_of(self.today)))
+
+    def test_week_param_names_any_date_in_the_target_week(self):
+        # Saturday of the current week names the same week as today does.
+        saturday = week_start_of(self.today) + datetime.timedelta(days=6)
+
+        response = self.client.get(reverse("calendar"), {"week": saturday.isoformat()})
+
+        self.assertContains(response, str(week_start_of(self.today)))
+
+    def test_prev_and_next_links_point_to_adjacent_sundays(self):
+        week_start = week_start_of(self.today)
+
+        response = self.client.get(reverse("calendar"), {"week": week_start.isoformat()})
+
+        prev_week = (week_start - datetime.timedelta(days=7)).isoformat()
+        next_week = (week_start + datetime.timedelta(days=7)).isoformat()
+        self.assertContains(response, f"?week={prev_week}")
+        self.assertContains(response, f"?week={next_week}")
+
+    def test_requesting_a_week_twice_generates_its_instances_exactly_once(self):
+        week_start = week_start_of(self.today)
+        self.assertFalse(ChoreInstance.objects.exists())
+
+        self.client.get(reverse("calendar"), {"week": week_start.isoformat()})
+        self.client.get(reverse("calendar"), {"week": week_start.isoformat()})
+
+        self.assertEqual(
+            ChoreInstance.objects.filter(template=self.template, date=week_start).count(), 1
+        )
+
+    def test_renders_chore_details_grouped_by_day(self):
+        instance = self._make_instance(self.today)
+
+        response = self.client.get(reverse("calendar"), {"week": self.today.isoformat()})
+
+        self.assertContains(response, "Dishes")
+        self.assertContains(response, "Alex")
+        self.assertContains(response, instance.scheduled_start.astimezone().strftime("%H:%M"))
+        self.assertContains(response, "Not done")
+
+    def test_a_week_entirely_of_past_days_renders_no_action_forms(self):
+        past_week_start = week_start_of(self.today) - datetime.timedelta(days=14)
+        for offset in range(7):
+            self._make_day_instance(past_week_start + datetime.timedelta(days=offset))
+
+        response = self.client.get(reverse("calendar"), {"week": past_week_start.isoformat()})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "<form")
+        self.assertNotContains(response, "Log time")
+        self.assertNotContains(response, "Swap")
+
+    def test_current_week_shows_forms_for_today_and_later_but_not_earlier_days(self):
+        week_start = week_start_of(self.today)
+        offsets = range(7)
+        earlier_dates = [
+            week_start + datetime.timedelta(days=offset)
+            for offset in offsets
+            if week_start + datetime.timedelta(days=offset) < self.today
+        ]
+        later_dates = [
+            week_start + datetime.timedelta(days=offset)
+            for offset in offsets
+            if week_start + datetime.timedelta(days=offset) >= self.today
+        ]
+
+        earlier_instances = [self._make_day_instance(date) for date in earlier_dates]
+        later_instances = [self._make_day_instance(date) for date in later_dates]
+
+        response = self.client.get(reverse("calendar"), {"week": week_start.isoformat()})
+        content = response.content.decode()
+
+        for instance in later_instances:
+            self.assertIn(reverse("swap", args=[instance.id]), content)
+
+        for instance in earlier_instances:
+            self.assertNotIn(reverse("swap", args=[instance.id]), content)
+
+    def _make_day_instance(self, date):
+        # A distinct WeeklyAssignmentTemplate per date, since (template,
+        # date) is unique and every date needs its own ChoreInstance.
+        day_of_week = 0 if date.weekday() == 6 else date.weekday() + 1
+        chore = Chore.objects.create(name=f"Chore-{date.isoformat()}")
+        template = WeeklyAssignmentTemplate.objects.create(
+            chore=chore,
+            assigned_to=self.active_person,
+            day_of_week=day_of_week,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        return ChoreInstance.objects.create(
+            template=template,
+            chore=chore,
+            date=date,
+            scheduled_start=timezone.make_aware(
+                datetime.datetime.combine(date, datetime.time(9, 0))
+            ),
+            budgeted_minutes=10,
+            assigned_person=self.active_person,
+        )
