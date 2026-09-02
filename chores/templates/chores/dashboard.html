@@ -28,6 +28,7 @@
                 {% endif %}
 
                 <a href="{% url 'log_time' instance.id %}">Log time</a>
+                <a href="{% url 'swap' instance.id %}">Swap</a>
             </li>
         {% empty %}
             <li>No chores scheduled for today.</li>
