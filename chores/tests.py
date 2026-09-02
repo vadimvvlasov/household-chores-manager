@@ -16,6 +16,7 @@ from .models import (
     ProposalStatus,
     ProposedAssignmentChange,
     ProposedBudgetChange,
+    SwapLog,
     TimeLog,
     WeeklyAssignmentTemplate,
 )
@@ -371,6 +372,8 @@ class SwapAssignmentServiceTests(TestCase):
         self.chore = Chore.objects.create(name="Dishes")
         self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
         self.other_person = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.third_person = Person.objects.create(name="Riley", role=Person.Role.KID)
+        self.swapper = Person.objects.create(name="Jamie", role=Person.Role.ADULT)
         self.template = WeeklyAssignmentTemplate.objects.create(
             chore=self.chore,
             assigned_to=self.person,
@@ -396,7 +399,7 @@ class SwapAssignmentServiceTests(TestCase):
     def test_swap_on_future_undone_instance_succeeds(self):
         instance = self._make_instance(timezone.localdate() + datetime.timedelta(days=1))
 
-        swap_assignment(instance, self.other_person)
+        swap_assignment(instance, self.other_person, swapped_by=self.swapper)
 
         instance.refresh_from_db()
         self.assertEqual(instance.assigned_person, self.other_person)
@@ -404,7 +407,7 @@ class SwapAssignmentServiceTests(TestCase):
     def test_swap_on_todays_undone_instance_succeeds(self):
         instance = self._make_instance(timezone.localdate())
 
-        swap_assignment(instance, self.other_person)
+        swap_assignment(instance, self.other_person, swapped_by=self.swapper)
 
         instance.refresh_from_db()
         self.assertEqual(instance.assigned_person, self.other_person)
@@ -413,10 +416,18 @@ class SwapAssignmentServiceTests(TestCase):
         instance = self._make_instance(timezone.localdate() - datetime.timedelta(days=1))
 
         with self.assertRaises(ValueError):
-            swap_assignment(instance, self.other_person)
+            swap_assignment(instance, self.other_person, swapped_by=self.swapper)
 
         instance.refresh_from_db()
         self.assertEqual(instance.assigned_person, self.person)
+
+    def test_swap_on_past_instance_creates_no_swap_log(self):
+        instance = self._make_instance(timezone.localdate() - datetime.timedelta(days=1))
+
+        with self.assertRaises(ValueError):
+            swap_assignment(instance, self.other_person, swapped_by=self.swapper)
+
+        self.assertEqual(SwapLog.objects.filter(chore_instance=instance).count(), 0)
 
     def test_swap_on_done_instance_raises_and_makes_no_change(self):
         instance = self._make_instance(
@@ -427,10 +438,23 @@ class SwapAssignmentServiceTests(TestCase):
         )
 
         with self.assertRaises(ValueError):
-            swap_assignment(instance, self.other_person)
+            swap_assignment(instance, self.other_person, swapped_by=self.swapper)
 
         instance.refresh_from_db()
         self.assertEqual(instance.assigned_person, self.person)
+
+    def test_swap_on_done_instance_creates_no_swap_log(self):
+        instance = self._make_instance(
+            timezone.localdate(),
+            is_done=True,
+            done_at=timezone.now(),
+            done_by=self.person,
+        )
+
+        with self.assertRaises(ValueError):
+            swap_assignment(instance, self.other_person, swapped_by=self.swapper)
+
+        self.assertEqual(SwapLog.objects.filter(chore_instance=instance).count(), 0)
 
     def test_swap_does_not_alter_time_logs_or_done_by(self):
         instance = self._make_instance(
@@ -443,13 +467,80 @@ class SwapAssignmentServiceTests(TestCase):
             logged_at=timezone.now(),
         )
 
-        swap_assignment(instance, self.other_person)
+        swap_assignment(instance, self.other_person, swapped_by=self.swapper)
 
         log.refresh_from_db()
         self.assertEqual(log.logged_by, self.person)
         instance.refresh_from_db()
         self.assertIsNone(instance.done_by)
         self.assertIsNone(instance.done_at)
+
+    def test_successful_swap_creates_one_swap_log_with_expected_fields(self):
+        instance = self._make_instance(timezone.localdate() + datetime.timedelta(days=1))
+        before = timezone.now()
+
+        swap_assignment(instance, self.other_person, swapped_by=self.swapper)
+
+        after = timezone.now()
+        logs = SwapLog.objects.filter(chore_instance=instance)
+        self.assertEqual(logs.count(), 1)
+        log = logs.get()
+        self.assertEqual(log.from_person, self.person)
+        self.assertEqual(log.to_person, self.other_person)
+        self.assertEqual(log.swapped_by, self.swapper)
+        self.assertGreaterEqual(log.swapped_at, before)
+        self.assertLessEqual(log.swapped_at, after)
+
+    def test_second_swap_creates_separate_log_row_and_leaves_first_untouched(self):
+        instance = self._make_instance(timezone.localdate() + datetime.timedelta(days=1))
+
+        swap_assignment(instance, self.other_person, swapped_by=self.swapper)
+        first_log = SwapLog.objects.get(chore_instance=instance)
+
+        instance.refresh_from_db()
+        swap_assignment(instance, self.third_person, swapped_by=self.swapper)
+
+        self.assertEqual(SwapLog.objects.filter(chore_instance=instance).count(), 2)
+        first_log.refresh_from_db()
+        self.assertEqual(first_log.from_person, self.person)
+        self.assertEqual(first_log.to_person, self.other_person)
+
+        second_log = (
+            SwapLog.objects.filter(chore_instance=instance).exclude(pk=first_log.pk).get()
+        )
+        self.assertEqual(second_log.from_person, self.other_person)
+        self.assertEqual(second_log.to_person, self.third_person)
+        self.assertEqual(second_log.swapped_by, self.swapper)
+
+
+class SwapLogCascadeDeleteTests(TestCase):
+    def setUp(self):
+        self.chore = Chore.objects.create(name="Dishes")
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+        self.other_person = Person.objects.create(name="Sam", role=Person.Role.KID)
+        self.template = WeeklyAssignmentTemplate.objects.create(
+            chore=self.chore,
+            assigned_to=self.person,
+            day_of_week=WeeklyAssignmentTemplate.DayOfWeek.SUNDAY,
+            start_time=datetime.time(9, 0),
+            duration_minutes=10,
+        )
+        self.instance = ChoreInstance.objects.create(
+            template=self.template,
+            chore=self.chore,
+            date=timezone.localdate() + datetime.timedelta(days=1),
+            scheduled_start=timezone.now(),
+            budgeted_minutes=10,
+            assigned_person=self.person,
+        )
+
+    def test_deleting_chore_instance_cascades_to_its_swap_logs(self):
+        swap_assignment(self.instance, self.other_person, swapped_by=self.person)
+        self.assertEqual(SwapLog.objects.filter(chore_instance=self.instance).count(), 1)
+
+        self.instance.delete()
+
+        self.assertEqual(SwapLog.objects.count(), 0)
 
 
 class ChoreInstanceAdminTests(TestCase):
@@ -846,6 +937,19 @@ class SwapViewTests(ChoreInstanceViewTestBase):
         )
 
         self.assertEqual(TimeLog.objects.filter(chore_instance=instance).count(), 0)
+
+    def test_post_records_active_person_as_swapped_by(self):
+        # active_person (the session's active person) is not to_person here,
+        # so this also confirms swapped_by isn't just echoing to_person.
+        instance = self._make_instance(self.today, assigned_person=self.active_person)
+
+        self.client.post(
+            reverse("swap", args=[instance.id]), {"new_person": self.other_person.id}
+        )
+
+        log = SwapLog.objects.get(chore_instance=instance)
+        self.assertEqual(log.swapped_by, self.active_person)
+        self.assertEqual(log.to_person, self.other_person)
 
 
 class MinutesLoggedTodayTests(TestCase):
