@@ -1,5 +1,6 @@
 import datetime
 
+import time_machine
 from django.contrib.auth.models import User
 from django.db.models import ProtectedError
 from django.test import TestCase
@@ -18,6 +19,7 @@ from .models import (
     TimeLog,
     WeeklyAssignmentTemplate,
 )
+from .notifications import get_unfinished_today, get_upcoming_blocks
 from .services import (
     apply_assignment_change,
     apply_budget_change,
@@ -1749,3 +1751,196 @@ class CalendarViewTests(ChoreInstanceViewTestBase):
             budgeted_minutes=10,
             assigned_person=self.active_person,
         )
+
+
+class NotificationsTestBase(TestCase):
+    """Shared setup for `get_upcoming_blocks`/`get_unfinished_today` tests.
+
+    Each instance gets its own `Chore`/`WeeklyAssignmentTemplate` so several
+    instances can share a `date` without tripping the `(template, date)`
+    uniqueness constraint.
+    """
+
+    def setUp(self):
+        self.person = Person.objects.create(name="Alex", role=Person.Role.ADULT)
+
+    def _make_instance(self, name, date, scheduled_start, is_done=False):
+        chore = Chore.objects.create(name=name)
+        template = WeeklyAssignmentTemplate.objects.create(
+            chore=chore,
+            assigned_to=self.person,
+            day_of_week=0 if date.weekday() == 6 else date.weekday() + 1,
+            start_time=scheduled_start.time(),
+            duration_minutes=10,
+        )
+        return ChoreInstance.objects.create(
+            template=template,
+            chore=chore,
+            date=date,
+            scheduled_start=scheduled_start,
+            budgeted_minutes=10,
+            assigned_person=self.person,
+            is_done=is_done,
+            done_at=timezone.now() if is_done else None,
+            done_by=self.person if is_done else None,
+        )
+
+
+class GetUpcomingBlocksTests(NotificationsTestBase):
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_29_minutes_out_is_included(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=29)
+        )
+
+        self.assertIn(instance, get_upcoming_blocks(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_31_minutes_out_is_excluded(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=31)
+        )
+
+        self.assertNotIn(instance, get_upcoming_blocks(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_exactly_at_lookahead_boundary_is_included(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=30)
+        )
+
+        self.assertIn(instance, get_upcoming_blocks(now, lookahead_minutes=30))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_exactly_at_now_is_included(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance("Dishes", now.date(), now)
+
+        self.assertIn(instance, get_upcoming_blocks(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 23, 50), tick=False)
+    def test_window_spanning_midnight_includes_next_days_instance(self):
+        now = timezone.localtime(timezone.now())
+        tomorrow = now.date() + datetime.timedelta(days=1)
+        instance = self._make_instance(
+            "Dishes",
+            tomorrow,
+            timezone.make_aware(datetime.datetime.combine(tomorrow, datetime.time(0, 10))),
+        )
+
+        self.assertIn(instance, get_upcoming_blocks(now, lookahead_minutes=30))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_done_instance_is_excluded(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=10), is_done=True
+        )
+
+        self.assertNotIn(instance, get_upcoming_blocks(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_results_are_ordered_by_scheduled_start(self):
+        now = timezone.localtime(timezone.now())
+        later = self._make_instance(
+            "Vacuum", now.date(), now + datetime.timedelta(minutes=20)
+        )
+        earlier = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=5)
+        )
+
+        self.assertEqual(list(get_upcoming_blocks(now)), [earlier, later])
+
+
+class GetUnfinishedTodayTests(NotificationsTestBase):
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_unfinished_instance_from_earlier_today_is_included(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now - datetime.timedelta(minutes=30)
+        )
+
+        self.assertIn(instance, get_unfinished_today(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_done_instance_is_excluded(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now - datetime.timedelta(minutes=30), is_done=True
+        )
+
+        self.assertNotIn(instance, get_unfinished_today(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_starting_in_the_future_today_is_excluded(self):
+        now = timezone.localtime(timezone.now())
+        instance = self._make_instance(
+            "Dishes", now.date(), now + datetime.timedelta(minutes=30)
+        )
+
+        self.assertNotIn(instance, get_unfinished_today(now))
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_instance_from_yesterday_is_excluded(self):
+        now = timezone.localtime(timezone.now())
+        yesterday = now.date() - datetime.timedelta(days=1)
+        instance = self._make_instance(
+            "Dishes",
+            yesterday,
+            timezone.make_aware(datetime.datetime.combine(yesterday, datetime.time(9, 0))),
+        )
+
+        self.assertNotIn(instance, get_unfinished_today(now))
+
+
+class DashboardNotificationsViewTests(ChoreInstanceViewTestBase):
+    """Confirms the dashboard view wires the two functions into the
+    "Starting soon"/"Unfinished today" sections, recomputed on every load
+    (no meta-refresh/polling/background job involved)."""
+
+    @time_machine.travel(datetime.datetime(2026, 9, 2, 10, 0), tick=False)
+    def test_dashboard_shows_upcoming_and_unfinished_sections(self):
+        now = timezone.localtime(timezone.now())
+        soon_chore = Chore.objects.create(name="Take out trash")
+        soon_template = WeeklyAssignmentTemplate.objects.create(
+            chore=soon_chore,
+            assigned_to=self.active_person,
+            day_of_week=0 if now.weekday() == 6 else now.weekday() + 1,
+            start_time=(now + datetime.timedelta(minutes=10)).time(),
+            duration_minutes=10,
+        )
+        ChoreInstance.objects.create(
+            template=soon_template,
+            chore=soon_chore,
+            date=now.date(),
+            scheduled_start=now + datetime.timedelta(minutes=10),
+            budgeted_minutes=10,
+            assigned_person=self.active_person,
+        )
+
+        overdue_chore = Chore.objects.create(name="Feed the cat")
+        overdue_template = WeeklyAssignmentTemplate.objects.create(
+            chore=overdue_chore,
+            assigned_to=self.active_person,
+            day_of_week=0 if now.weekday() == 6 else now.weekday() + 1,
+            start_time=(now - datetime.timedelta(hours=1)).time(),
+            duration_minutes=10,
+        )
+        ChoreInstance.objects.create(
+            template=overdue_template,
+            chore=overdue_chore,
+            date=now.date(),
+            scheduled_start=now - datetime.timedelta(hours=1),
+            budgeted_minutes=10,
+            assigned_person=self.active_person,
+        )
+
+        response = self.client.get("/")
+
+        self.assertContains(response, "Starting soon")
+        self.assertContains(response, "Take out trash")
+        self.assertContains(response, "Unfinished today")
+        self.assertContains(response, "Feed the cat")
