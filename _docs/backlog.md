@@ -1,6 +1,6 @@
 # Household Chores Manager — v1 Backlog
 
-Each task independent, one-session sized. Based on `_docs/plan.md` spec + locked stack decisions (Django + uv, single shared login w/ session-based active-person picker, in-app live-computed notifications only, Django templates + HTMX, server-rendered calendar grid — no JS build, no Celery/cron/push).
+Each task independent, one-session sized. Based on `_docs/plan.md` spec + `_docs/architecture.md` (Django + uv, single shared login w/ session-based active-person picker, in-app notifications recomputed on page load, plain Django template forms with full-page POST/redirect/GET — no HTMX, no JS build, no Celery/cron/push).
 
 ## 1. Project scaffolding with a passing test
 Goal: Empty Django project runs and tests pass.
@@ -24,28 +24,24 @@ Description: Service function that, given a week's Sunday date, creates `ChoreIn
 
 ## 6. Check-off + time log on a chore instance
 Goal: Mark a chore done and record actual minutes spent.
-Description: HTMX endpoints to toggle `is_done` on a `ChoreInstance` and to add a time-log entry (person, minutes, timestamp). Dashboard partial re-renders the instance card in place after either action, no full page reload.
+Description: Plain form views to toggle `is_done` on a `ChoreInstance` and to add a time-log entry (person, minutes, timestamp), each posting and redirecting back to the dashboard. Reject both actions server-side for instances dated before today.
 
 ## 7. Daily & weekly time budgets with non-blocking warnings
 Goal: Show when someone's approaching or over their time cap, without stopping them.
-Description: `TimeBudget` model (per person, daily or weekly minutes cap). Add a service that sums logged time for a person/day/week and compares to their active budget, and a warning badge shown on the dashboard when exceeded. Exceeding a budget must never block check-off or time-logging.
+Description: `daily_budget_minutes`/`weekly_budget_minutes` fields on `Person` (nullable = no cap set). Add a service that sums logged time for a person/day/week and compares to these fields, and a warning badge shown on the dashboard when exceeded. Exceeding a budget must never block check-off or time-logging.
 
 ## 8. Instant chore swap between two people
 Goal: Let any two family members trade who's doing a specific day's chore, immediately.
-Description: Swap endpoint that reassigns a `ChoreInstance.assigned_person` on the spot and records a `Swap` audit row (from/to/who requested it). No approval step. Reject swaps on instances that are already done or dated in the past.
+Description: Swap endpoint that reassigns a `ChoreInstance.assigned_person` directly to another person, on the spot. No approval step, no separate audit record — `assigned_person` plus `done_by` are enough for who's-responsible/who-actually-did-it visibility. Reject swaps on instances that are already done or dated in the past.
 
 ## 9. Propose/edit changes with kid-approval gating
 Goal: Kids can suggest assignment/budget changes; adults can apply changes immediately.
-Description: A generic pending-change (`Proposal`) mechanism covering both assignment-template and budget edits. When the active person is an adult, edits apply immediately; when a kid, the edit becomes a pending proposal an adult must approve or reject from a queue view. Enforce the adult-only approve/reject action server-side, not just by hiding the button.
+Description: Two small pending-change models — `ProposedAssignmentChange` and `ProposedBudgetChange` — each with plain typed fields for the proposed values (no generic/JSON payload). When the active person is an adult, edits apply immediately via a shared apply-service function; when a kid, the edit becomes a pending row an adult must approve or reject from a queue view, which calls that same apply function. Enforce the adult-only approve/reject action server-side, not just by hiding the button.
 
-## 10. Weekly calendar view
-Goal: One place to see the week's chore time blocks only.
-Description: Server-rendered week grid (simple per-day ordered list, not an hour-by-hour pixel calendar) showing each person's scheduled chore blocks for the selected week, with prev/next week navigation. Viewing a week triggers lazy instance generation for it if not already generated.
+## 10. Weekly calendar view (also serves as history)
+Goal: One place to see the week's chore time blocks — for this week or any past week.
+Description: Server-rendered week grid (simple per-day ordered list, not an hour-by-hour pixel calendar) showing each person's scheduled chore blocks for the selected week, with prev/next week navigation. Viewing a week triggers lazy instance generation for it if not already generated. For a past week, the same server-side "no edits before today" guard from tasks #6/#8 means the grid is naturally read-only — no separate history view/URL needed.
 
 ## 11. In-app notifications (starting soon + unfinished today)
 Goal: Surface time-sensitive info without any background jobs.
-Description: Two live-computed queries — chore blocks starting within the next ~30 minutes, and today's chores still unfinished after their start time. Render as a dashboard banner, refreshed via HTMX polling (e.g. every 45s), computed fresh from current server time on every request.
-
-## 12. Weekly history view
-Goal: Let the family look back at past weeks' plans, completions, and time spent.
-Description: Read-only index of past weeks plus a per-week detail view (can reuse the calendar template with actions hidden). Must show each past week exactly as it was at the time, unaffected by later edits to the weekly template — and must reject any check-off/swap/log-time POST against a past instance server-side.
+Description: Two live-computed queries — chore blocks starting within the next ~30 minutes, and today's chores still unfinished after their start time. Render as a dashboard section, recomputed fresh from current server time on every full-page load (no polling, no background job).
