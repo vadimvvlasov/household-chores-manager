@@ -53,8 +53,9 @@ def calendar_view(request):
     ensure_instances_generated(week_start)
 
     today = timezone.localdate()
+    week_end = week_start + datetime.timedelta(days=6)
     instances = (
-        ChoreInstance.objects.filter(date__gte=week_start, date__lte=week_start + datetime.timedelta(days=6))
+        ChoreInstance.objects.filter(date__gte=week_start, date__lte=week_end)
         .select_related("chore", "assigned_person")
         .order_by("date", "scheduled_start")
     )
