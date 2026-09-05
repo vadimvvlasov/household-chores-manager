@@ -6,7 +6,7 @@ Built as Homework 1 for [AI Dev Tools Zoomcamp](https://github.com/DataTalksClub
 
 ## Scope
 
-See [`_docs/plan.md`](_docs/plan.md) for the full spec (users, features, out-of-scope for v1).
+See [`_docs/outdated/plan.md`](_docs/outdated/plan.md) for the original spec (users, features, out-of-scope for v1). Superseded day-to-day by the GitHub issue backlog — see Engineering process below.
 
 ## Stack
 
